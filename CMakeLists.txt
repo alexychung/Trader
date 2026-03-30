@@ -35,6 +35,7 @@ add_library(trader_core STATIC
     src/strategy/kalshi/market_filter.cpp
     src/strategy/kalshi/calibration.cpp
     src/strategy/kalshi/event_strategy.cpp
+    src/core/dashboard.cpp
     src/risk/risk_manager.cpp
     src/risk/kill_switch.cpp
 )
@@ -75,6 +76,7 @@ add_executable(trader_tests
     tests/test_kill_switch.cpp
     tests/test_calibration.cpp
     tests/test_event_strategy.cpp
+    tests/test_dashboard.cpp
     tests/test_risk_manager.cpp
 )
 target_link_libraries(trader_tests PRIVATE
