@@ -1,0 +1,71 @@
+#pragma once
+
+#include "core/types.hpp"
+#include "core/config.hpp"
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <mutex>
+
+namespace trader {
+
+struct RiskPosition {
+    std::string ticker;
+    std::string contract_side;
+    int quantity = 0;
+    double cost = 0.0;
+    bool settled = false;
+};
+
+struct TradeCheck {
+    bool allowed = false;
+    std::string reason;
+};
+
+class RiskManager {
+public:
+    explicit RiskManager(const RiskConfig& config);
+
+    // Pre-trade gate: ALL checks must pass
+    TradeCheck check_trade(const std::string& ticker, int quantity, double price) const;
+
+    // Position updates
+    void on_fill(const std::string& ticker, const std::string& contract_side,
+                 int quantity, double price);
+    void on_settlement(const std::string& ticker, double pnl);
+
+    // State queries
+    double total_exposure() const;
+    double available_capital() const;
+    double daily_pnl() const { return daily_pnl_; }
+    int active_market_count() const;
+    double balance() const { return balance_; }
+
+    // Set/update balance
+    void set_balance(double b) { balance_ = b; }
+    void adjust_balance(double delta) { balance_ += delta; }
+
+    // Kill switch state
+    bool is_killed() const { return killed_; }
+    void trigger_kill(const std::string& reason);
+    void reset_kill();
+
+    // Daily reset (called at midnight UTC)
+    void reset_daily();
+
+    const RiskConfig& config() const { return config_; }
+
+private:
+    RiskConfig config_;
+    double balance_ = 100.0;
+    double daily_pnl_ = 0.0;
+    double day_start_balance_ = 100.0;
+    bool killed_ = false;
+    std::string kill_reason_;
+
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, RiskPosition> positions_;
+    std::unordered_set<std::string> active_markets_;
+};
+
+} // namespace trader
