@@ -33,7 +33,10 @@ add_library(trader_core STATIC
     src/strategy/kalshi/data_feed_manager.cpp
     src/strategy/kalshi/econ_models.cpp
     src/strategy/kalshi/market_filter.cpp
+    src/strategy/kalshi/calibration.cpp
+    src/strategy/kalshi/event_strategy.cpp
     src/risk/risk_manager.cpp
+    src/risk/kill_switch.cpp
 )
 target_include_directories(trader_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(trader_core PUBLIC
@@ -69,6 +72,9 @@ add_executable(trader_tests
     tests/test_data_feed_manager.cpp
     tests/test_econ_models.cpp
     tests/test_market_filter.cpp
+    tests/test_kill_switch.cpp
+    tests/test_calibration.cpp
+    tests/test_event_strategy.cpp
     tests/test_risk_manager.cpp
 )
 target_link_libraries(trader_tests PRIVATE
