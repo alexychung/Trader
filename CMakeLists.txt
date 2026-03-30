@@ -29,6 +29,7 @@ add_library(trader_core STATIC
     src/strategy/kalshi/weather_feed.cpp
     src/strategy/kalshi/econ_feed.cpp
     src/strategy/kalshi/probability_engine.cpp
+    src/strategy/kalshi/edge_detector.cpp
 )
 target_include_directories(trader_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(trader_core PUBLIC
@@ -60,6 +61,7 @@ add_executable(trader_tests
     tests/test_weather_feed.cpp
     tests/test_econ_feed.cpp
     tests/test_probability_engine.cpp
+    tests/test_edge_detector.cpp
 )
 target_link_libraries(trader_tests PRIVATE
     trader_core
