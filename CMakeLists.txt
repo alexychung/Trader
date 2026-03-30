@@ -25,6 +25,7 @@ add_library(trader_core STATIC
     src/exchange/kalshi/auth.cpp
     src/exchange/kalshi/rest_client.cpp
     src/exchange/kalshi/ws_client.cpp
+    src/exchange/kalshi/kalshi_exchange.cpp
 )
 target_include_directories(trader_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(trader_core PUBLIC
@@ -52,6 +53,7 @@ add_executable(trader_tests
     tests/test_kalshi_auth.cpp
     tests/test_kalshi_rest.cpp
     tests/test_kalshi_ws.cpp
+    tests/test_kalshi_exchange.cpp
 )
 target_link_libraries(trader_tests PRIVATE
     trader_core
