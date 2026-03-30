@@ -1,0 +1,33 @@
+# Build
+build/
+build-release/
+out/
+CMakeUserPresets.json
+
+# IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+# vcpkg local
+vcpkg_installed/
+
+# Config with secrets
+config/config.yaml
+secrets/
+
+# Data
+data/cache/
+data/calibration.db
+logs/
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Task database (local, gitignored per pm-agent convention)
+.pm/tasks.db
+
+# Working memory
+.wm/

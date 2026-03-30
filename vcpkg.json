@@ -1,0 +1,14 @@
+{
+  "name": "trader",
+  "version": "0.1.0",
+  "description": "Dual-venue automated trading system (Kalshi + dYdX)",
+  "dependencies": [
+    "boost-beast",
+    "boost-asio",
+    "nlohmann-json",
+    "spdlog",
+    "yaml-cpp",
+    "openssl",
+    "gtest"
+  ]
+}

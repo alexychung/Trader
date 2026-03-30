@@ -1,0 +1,45 @@
+# Trader Configuration Template
+# Copy to config.yaml and fill in your API keys
+
+venue: "kalshi"
+mode: "paper"  # "paper" or "live"
+
+kalshi:
+  api_base: "https://demo-api.kalshi.co/trade-api/v2"
+  ws_url: "wss://demo-api.kalshi.co/trade-api/ws/v2"
+  api_key_file: "secrets/kalshi_api_key.pem"
+  api_key_id: "YOUR_API_KEY_ID"
+
+# Phase 2 (unused for now)
+dydx:
+  api_base: "https://indexer.dydx.trade/v4"
+
+risk:
+  max_position_per_market: 10
+  max_total_exposure: 80
+  max_daily_loss: 15
+  kill_switch_loss: 30
+  cash_reserve_pct: 0.20
+  maker_only: true
+
+feeds:
+  open_meteo:
+    base_url: "https://ensemble-api.open-meteo.com/v1/ensemble"
+    refresh_hours: 6
+  bls:
+    base_url: "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+    api_key: "YOUR_BLS_API_KEY"
+  fred:
+    base_url: "https://api.stlouisfed.org/fred/"
+    api_key: "YOUR_FRED_API_KEY"
+
+strategy:
+  min_edge_threshold: 0.05
+  min_spread_to_mm: 0.08
+  kelly_fraction: 0.25
+  tick_interval_seconds: 60
+
+logging:
+  level: "info"
+  file: "logs/trader.log"
+  console: true
