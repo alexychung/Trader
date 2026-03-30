@@ -30,6 +30,9 @@ add_library(trader_core STATIC
     src/strategy/kalshi/econ_feed.cpp
     src/strategy/kalshi/probability_engine.cpp
     src/strategy/kalshi/edge_detector.cpp
+    src/strategy/kalshi/data_feed_manager.cpp
+    src/strategy/kalshi/econ_models.cpp
+    src/strategy/kalshi/market_filter.cpp
     src/risk/risk_manager.cpp
 )
 target_include_directories(trader_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
@@ -63,6 +66,9 @@ add_executable(trader_tests
     tests/test_econ_feed.cpp
     tests/test_probability_engine.cpp
     tests/test_edge_detector.cpp
+    tests/test_data_feed_manager.cpp
+    tests/test_econ_models.cpp
+    tests/test_market_filter.cpp
     tests/test_risk_manager.cpp
 )
 target_link_libraries(trader_tests PRIVATE
