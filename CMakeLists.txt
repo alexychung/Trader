@@ -77,6 +77,7 @@ add_executable(trader_tests
     tests/test_calibration.cpp
     tests/test_event_strategy.cpp
     tests/test_dashboard.cpp
+    tests/test_bugfixes.cpp
     tests/test_risk_manager.cpp
 )
 target_link_libraries(trader_tests PRIVATE

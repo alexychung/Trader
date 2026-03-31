@@ -15,6 +15,28 @@ namespace trader::kalshi {
 class KalshiAuth {
 public:
     KalshiAuth() = default;
+    ~KalshiAuth() {
+        if (pkey_) {
+            EVP_PKEY_free(pkey_);
+            pkey_ = nullptr;
+        }
+    }
+
+    // Non-copyable (EVP_PKEY* is not safely copyable)
+    KalshiAuth(const KalshiAuth&) = delete;
+    KalshiAuth& operator=(const KalshiAuth&) = delete;
+    KalshiAuth(KalshiAuth&& other) noexcept : pkey_(other.pkey_), api_key_id_(std::move(other.api_key_id_)) {
+        other.pkey_ = nullptr;
+    }
+    KalshiAuth& operator=(KalshiAuth&& other) noexcept {
+        if (this != &other) {
+            if (pkey_) EVP_PKEY_free(pkey_);
+            pkey_ = other.pkey_;
+            api_key_id_ = std::move(other.api_key_id_);
+            other.pkey_ = nullptr;
+        }
+        return *this;
+    }
 
     // Load RSA private key from PEM file
     bool load_key(const std::string& pem_path);

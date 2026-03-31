@@ -6,6 +6,7 @@
 namespace trader::kalshi {
 
 void CalibrationLogger::log_trade(const CalibrationRecord& record) {
+    std::lock_guard<std::mutex> lock(mutex_);
     records_.push_back(record);
     spdlog::info("Calibration: {} {} {}x @ ${:.4f} (model: {:.1f}%, market: {:.1f}%, edge: {:.1f}%)",
                  record.market_ticker, record.side, record.quantity,
@@ -14,6 +15,7 @@ void CalibrationLogger::log_trade(const CalibrationRecord& record) {
 }
 
 void CalibrationLogger::resolve(const std::string& ticker, bool outcome, double pnl) {
+    std::lock_guard<std::mutex> lock(mutex_);
     auto now = std::chrono::system_clock::now();
     for (auto& rec : records_) {
         if (rec.market_ticker == ticker && !rec.outcome.has_value()) {
@@ -24,7 +26,18 @@ void CalibrationLogger::resolve(const std::string& ticker, bool outcome, double 
     }
 }
 
+std::vector<CalibrationRecord> CalibrationLogger::records() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return records_;
+}
+
+int CalibrationLogger::total_trades() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<int>(records_.size());
+}
+
 int CalibrationLogger::resolved_trades() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     int count = 0;
     for (const auto& rec : records_) {
         if (rec.outcome.has_value()) ++count;
@@ -33,6 +46,7 @@ int CalibrationLogger::resolved_trades() const {
 }
 
 double CalibrationLogger::total_pnl() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     double total = 0.0;
     for (const auto& rec : records_) {
         if (rec.pnl.has_value()) total += *rec.pnl;
@@ -41,6 +55,7 @@ double CalibrationLogger::total_pnl() const {
 }
 
 BrierResult CalibrationLogger::brier_score(const std::string& category) const {
+    std::lock_guard<std::mutex> lock(mutex_);
     BrierResult result;
     result.category = category;
 
@@ -51,15 +66,12 @@ BrierResult CalibrationLogger::brier_score(const std::string& category) const {
         if (!rec.outcome.has_value()) continue;
         if (!category.empty() && rec.category != category) continue;
 
-        // For YES side: predicted = model_probability, actual = 1.0 if YES won
-        // For NO side: predicted = 1.0 - model_probability, actual = 1.0 if NO won
-        double predicted = rec.model_probability;
-        double actual = (*rec.outcome) ? 1.0 : 0.0;
-
-        if (rec.side == "no") {
-            predicted = 1.0 - predicted;
-            actual = 1.0 - actual;
-        }
+        // Transform to the side we actually traded:
+        // If we traded YES: predicted = P(YES), actual = 1 if YES won
+        // If we traded NO:  predicted = P(NO) = 1-P(YES), actual = 1 if NO won
+        double predicted = (rec.side == "no") ? (1.0 - rec.model_probability) : rec.model_probability;
+        bool our_side_won = (rec.side == "yes") ? (*rec.outcome) : !(*rec.outcome);
+        double actual = our_side_won ? 1.0 : 0.0;
 
         double error = predicted - actual;
         sum_sq += error * error;
@@ -72,7 +84,7 @@ BrierResult CalibrationLogger::brier_score(const std::string& category) const {
 }
 
 std::vector<CalibrationBucket> CalibrationLogger::calibration_curve(const std::string& category) const {
-    // 10 buckets: [0,0.1), [0.1,0.2), ..., [0.9,1.0]
+    std::lock_guard<std::mutex> lock(mutex_);
     constexpr int NUM_BUCKETS = 10;
     std::vector<int> counts(NUM_BUCKETS, 0);
     std::vector<double> sum_pred(NUM_BUCKETS, 0.0);
@@ -82,18 +94,13 @@ std::vector<CalibrationBucket> CalibrationLogger::calibration_curve(const std::s
         if (!rec.outcome.has_value()) continue;
         if (!category.empty() && rec.category != category) continue;
 
-        double predicted = rec.model_probability;
-        bool actual_yes = *rec.outcome;
-
-        if (rec.side == "no") {
-            predicted = 1.0 - predicted;
-            actual_yes = !actual_yes;
-        }
+        double predicted = (rec.side == "no") ? (1.0 - rec.model_probability) : rec.model_probability;
+        bool our_side_won = (rec.side == "yes") ? (*rec.outcome) : !(*rec.outcome);
 
         int bucket = std::min(static_cast<int>(predicted * NUM_BUCKETS), NUM_BUCKETS - 1);
         counts[bucket]++;
         sum_pred[bucket] += predicted;
-        if (actual_yes) sum_actual[bucket]++;
+        if (our_side_won) sum_actual[bucket]++;
     }
 
     std::vector<CalibrationBucket> result;

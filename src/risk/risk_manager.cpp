@@ -11,6 +11,11 @@ RiskManager::RiskManager(const RiskConfig& config)
 TradeCheck RiskManager::check_trade(const std::string& ticker, int quantity, double price) const {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // Sells (reducing positions) are always allowed, even when killed
+    if (quantity < 0) {
+        return {true, "OK (sell/reduce)"};
+    }
+
     if (killed_) {
         return {false, "Kill switch active: " + kill_reason_};
     }
@@ -60,16 +65,35 @@ TradeCheck RiskManager::check_trade(const std::string& ticker, int quantity, dou
 
 void RiskManager::on_fill(const std::string& ticker, const std::string& contract_side,
                            int quantity, double price) {
+    // quantity > 0 = buy, quantity < 0 = sell
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto& pos = positions_[ticker];
     pos.ticker = ticker;
     pos.contract_side = contract_side;
-    pos.quantity += quantity;
-    pos.cost += price * quantity;
-    active_markets_.insert(ticker);
 
-    balance_ -= price * quantity;
+    if (quantity > 0) {
+        // Buy: increase position, debit balance
+        pos.quantity += quantity;
+        pos.cost += price * quantity;
+        balance_ -= price * quantity;
+    } else {
+        // Sell: reduce position, credit balance
+        int reduce = -quantity;
+        int actual_reduce = std::min(reduce, pos.quantity);
+        if (pos.quantity > 0 && actual_reduce > 0) {
+            double avg = pos.cost / pos.quantity;
+            pos.quantity -= actual_reduce;
+            pos.cost = pos.quantity * avg;
+        }
+        balance_ += price * reduce;
+    }
+
+    if (pos.quantity > 0) {
+        active_markets_.insert(ticker);
+    } else {
+        active_markets_.erase(ticker);
+    }
 }
 
 void RiskManager::on_settlement(const std::string& ticker, double pnl) {

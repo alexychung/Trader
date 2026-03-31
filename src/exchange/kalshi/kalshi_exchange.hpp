@@ -95,6 +95,7 @@ private:
     mutable std::mutex positions_mutex_;
     std::unordered_map<std::string, MarketPosition> positions_;
 
+    mutable std::mutex balance_mutex_;
     double balance_ = 0.0;
 };
 

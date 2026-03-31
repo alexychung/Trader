@@ -72,10 +72,12 @@ void KalshiWsClient::update_book_state(const std::string& ticker, double yes_bid
                                          double yes_ask, double last_price, int volume) {
     std::lock_guard<std::mutex> lock(book_mutex_);
     auto& state = book_states_[ticker];
-    if (yes_bid > 0) state.yes_bid = yes_bid;
-    if (yes_ask > 0) state.yes_ask = yes_ask;
-    if (last_price > 0) state.last_price = last_price;
-    if (volume > 0) state.volume = volume;
+    // Use >= 0 to allow zero values (a bid of $0.00 is valid — YES is worthless)
+    // Use < 0 as sentinel for "not provided in this update" (-1.0)
+    if (yes_bid >= 0.0) state.yes_bid = yes_bid;
+    if (yes_ask >= 0.0) state.yes_ask = yes_ask;
+    if (last_price >= 0.0) state.last_price = last_price;
+    if (volume >= 0) state.volume = volume;
     state.last_update = std::chrono::system_clock::now();
 }
 
@@ -180,7 +182,8 @@ void KalshiWsClient::process_message(const std::string& raw) {
             }
         } else if (type == "orderbook_delta") {
             if (auto delta = parse_orderbook_delta(data)) {
-                update_book_state(delta->ticker, delta->yes_bid, delta->yes_ask, 0.0, 0);
+                // Pass -1 for fields not in orderbook_delta to preserve existing values
+                update_book_state(delta->ticker, delta->yes_bid, delta->yes_ask, -1.0, -1);
                 WsMarketUpdate update;
                 update.ticker = delta->ticker;
                 update.yes_bid = delta->yes_bid;

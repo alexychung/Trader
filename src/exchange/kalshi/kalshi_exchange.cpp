@@ -18,8 +18,11 @@ KalshiExchange::KalshiExchange(const std::string& rest_url, const std::string& w
 
 bool KalshiExchange::connect() {
     // Fetch initial balance
-    balance_ = rest_.get_balance();
-    spdlog::info("KalshiExchange connected, balance: ${:.2f}", balance_);
+    {
+        std::lock_guard<std::mutex> lock(balance_mutex_);
+        balance_ = rest_.get_balance();
+    }
+    spdlog::info("KalshiExchange connected, balance: ${:.2f}", get_balance());
     return ws_.connect();
 }
 
@@ -73,6 +76,7 @@ bool KalshiExchange::cancel_order(const OrderId& id) {
 }
 
 double KalshiExchange::get_balance() const {
+    std::lock_guard<std::mutex> lock(balance_mutex_);
     return balance_;
 }
 
@@ -151,14 +155,18 @@ void KalshiExchange::on_fill(const WsFill& fill) {
         }
     }
 
-    // Update position
-    if (fill.action == "buy") {
-        update_position_on_fill(fill.ticker, fill.side, fill.price, fill.count);
-        balance_ -= fill.price * fill.count;  // Debit for buy
-    } else {
-        // Sell reduces position
-        update_position_on_fill(fill.ticker, fill.side, fill.price, -fill.count);
-        balance_ += fill.price * fill.count;  // Credit for sell
+    // Update position and balance (including maker fees)
+    double fee = kalshi_maker_fee(fill.count, fill.price);
+    {
+        std::lock_guard<std::mutex> lock(balance_mutex_);
+        if (fill.action == "buy") {
+            update_position_on_fill(fill.ticker, fill.side, fill.price, fill.count);
+            balance_ -= fill.price * fill.count + fee;  // Debit + fee
+        } else {
+            // Sell reduces position
+            update_position_on_fill(fill.ticker, fill.side, fill.price, -fill.count);
+            balance_ += fill.price * fill.count - fee;  // Credit - fee
+        }
     }
 }
 
@@ -204,6 +212,7 @@ void KalshiExchange::on_settlement(const std::string& ticker, bool outcome) {
     if ((we_hold_yes && yes_won) || (!we_hold_yes && !yes_won)) {
         // We win: receive $1.00 per contract
         pos.settled_pnl = (1.0 * pos.quantity) - pos.total_cost;
+        std::lock_guard<std::mutex> block(balance_mutex_);
         balance_ += 1.0 * pos.quantity;
     } else {
         // We lose: contracts worthless

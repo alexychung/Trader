@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <mutex>
 
 namespace trader::kalshi {
 
@@ -52,12 +53,13 @@ public:
     std::vector<CalibrationBucket> calibration_curve(const std::string& category = "") const;
 
     // Access records
-    const std::vector<CalibrationRecord>& records() const { return records_; }
-    int total_trades() const { return static_cast<int>(records_.size()); }
+    std::vector<CalibrationRecord> records() const;
+    int total_trades() const;
     int resolved_trades() const;
     double total_pnl() const;
 
 private:
+    mutable std::mutex mutex_;
     std::vector<CalibrationRecord> records_;
 };
 
