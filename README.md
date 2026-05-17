@@ -100,7 +100,11 @@ Status: Balance $98.40 (cap $150.00) | Exposure $12.30 | Daily $-1.60 |
 Triggers automatically on:
 - Daily loss past `kill_switch_loss` (default $30).
 - 3 consecutive order failures.
-- WS connectivity loss > 60s.
+- Sustained connectivity loss. Note: the configured `connectivity_timeout`
+  defaults to 60s, but the heartbeat is also pinged unconditionally per
+  completed tick body, so a real network outage trips much later in
+  practice (~3h observed during a 2026-05-07 DNS outage). Treat the kill
+  switch as a backstop, not a fast circuit-breaker — monitor logs.
 
 You can also Ctrl+C — the bot does a clean shutdown and persists state.
 
