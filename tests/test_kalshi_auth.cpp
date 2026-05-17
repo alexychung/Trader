@@ -6,11 +6,12 @@
 #include <fstream>
 #include <filesystem>
 #include <cstring>
+#include <vector>
 
 using namespace trader::kalshi;
 
-// Generate a test RSA key pair in PEM format
-static std::string generate_test_rsa_key() {
+// Generate a test RSA key pair. Returns (private_pem, public_pem).
+static std::pair<std::string, std::string> generate_test_rsa_keypair() {
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, nullptr);
     EVP_PKEY_keygen_init(ctx);
     EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, 2048);
@@ -19,16 +20,65 @@ static std::string generate_test_rsa_key() {
     EVP_PKEY_keygen(ctx, &pkey);
     EVP_PKEY_CTX_free(ctx);
 
-    BIO* bio = BIO_new(BIO_s_mem());
-    PEM_write_bio_PrivateKey(bio, pkey, nullptr, nullptr, 0, nullptr, nullptr);
+    BIO* priv_bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_PrivateKey(priv_bio, pkey, nullptr, nullptr, 0, nullptr, nullptr);
+    BUF_MEM* priv_ptr;
+    BIO_get_mem_ptr(priv_bio, &priv_ptr);
+    std::string priv_pem(priv_ptr->data, priv_ptr->length);
+    BIO_free(priv_bio);
 
-    BUF_MEM* bptr;
-    BIO_get_mem_ptr(bio, &bptr);
-    std::string pem(bptr->data, bptr->length);
+    BIO* pub_bio = BIO_new(BIO_s_mem());
+    PEM_write_bio_PUBKEY(pub_bio, pkey);
+    BUF_MEM* pub_ptr;
+    BIO_get_mem_ptr(pub_bio, &pub_ptr);
+    std::string pub_pem(pub_ptr->data, pub_ptr->length);
+    BIO_free(pub_bio);
 
-    BIO_free(bio);
     EVP_PKEY_free(pkey);
-    return pem;
+    return {priv_pem, pub_pem};
+}
+
+static std::string generate_test_rsa_key() {
+    return generate_test_rsa_keypair().first;
+}
+
+// Decode standard base64 (non-URL) into raw bytes.
+static std::vector<unsigned char> base64_decode(const std::string& b64) {
+    BIO* mem = BIO_new_mem_buf(b64.data(), static_cast<int>(b64.size()));
+    BIO* b = BIO_new(BIO_f_base64());
+    BIO_set_flags(b, BIO_FLAGS_BASE64_NO_NL);
+    b = BIO_push(b, mem);
+    std::vector<unsigned char> out(b64.size());
+    int n = BIO_read(b, out.data(), static_cast<int>(out.size()));
+    BIO_free_all(b);
+    if (n <= 0) return {};
+    out.resize(n);
+    return out;
+}
+
+// Verify an RSA-PSS/SHA256 signature with salt = digest length.
+static bool verify_pss(const std::string& public_pem,
+                       const std::string& message,
+                       const std::string& b64_sig) {
+    BIO* bio = BIO_new_mem_buf(public_pem.data(), static_cast<int>(public_pem.size()));
+    EVP_PKEY* pkey = PEM_read_bio_PUBKEY(bio, nullptr, nullptr, nullptr);
+    BIO_free(bio);
+    if (!pkey) return false;
+
+    auto sig = base64_decode(b64_sig);
+    if (sig.empty()) { EVP_PKEY_free(pkey); return false; }
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_PKEY_CTX* pctx = nullptr;
+    bool ok = EVP_DigestVerifyInit(ctx, &pctx, EVP_sha256(), nullptr, pkey) == 1
+              && EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING) == 1
+              && EVP_PKEY_CTX_set_rsa_pss_saltlen(pctx, EVP_MD_CTX_get_size(ctx)) == 1
+              && EVP_DigestVerifyUpdate(ctx, message.data(), message.size()) == 1
+              && EVP_DigestVerifyFinal(ctx, sig.data(), sig.size()) == 1;
+
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    return ok;
 }
 
 class KalshiAuthTest : public ::testing::Test {
@@ -137,6 +187,67 @@ TEST_F(KalshiAuthTest, MakeHeadersProducesAllThreeFields) {
     // Timestamp should be a valid millisecond timestamp
     int64_t ts = std::stoll(headers.timestamp);
     EXPECT_GT(ts, 1700000000000LL);
+}
+
+TEST_F(KalshiAuthTest, SignatureUsesPss32ByteSaltAndStandardBase64) {
+    // Concrete verification that our signatures decode as standard base64 (not
+    // URL-safe) and validate under RSA-PSS/SHA-256 with salt length = digest
+    // length = 32 bytes. The verifier in verify_pss enforces exactly these
+    // parameters — if the signer ever drifts (PKCS1 padding, different salt,
+    // URL-safe b64), this test fails.
+    auto [priv, pub] = generate_test_rsa_keypair();
+    KalshiAuth auth;
+    ASSERT_TRUE(auth.load_key_from_string(priv));
+    auth.set_api_key_id("k");
+
+    const int64_t ts = 1744200000123LL;
+    auto h = auth.make_headers("POST", "/trade-api/v2/portfolio/orders", ts);
+    const std::string expected_message = std::to_string(ts) + "POST/trade-api/v2/portfolio/orders";
+
+    // Standard base64 alphabet only — no '-' or '_'.
+    for (char c : h.signature) {
+        EXPECT_TRUE(std::isalnum(static_cast<unsigned char>(c)) || c == '+' || c == '/' || c == '=')
+            << "URL-safe base64 char '" << c << "' leaked into signature";
+    }
+    // And the signature actually verifies under PSS/SHA-256 with 32-byte salt.
+    EXPECT_TRUE(verify_pss(pub, expected_message, h.signature));
+}
+
+TEST_F(KalshiAuthTest, TimestampHeaderIsMillisecondsString) {
+    // KALSHI-ACCESS-TIMESTAMP must be milliseconds-since-epoch as a string.
+    // Seconds (10-digit) would be silently accepted by some servers as "old"
+    // and rejected for skew. Enforce 13 digits and numeric round-trip.
+    KalshiAuth auth;
+    ASSERT_TRUE(auth.load_key_from_string(test_key_pem_));
+    auth.set_api_key_id("k");
+
+    auto h = auth.make_headers("GET", "/markets");
+    EXPECT_GE(h.timestamp.size(), 13u);
+    EXPECT_LE(h.timestamp.size(), 14u);  // allows future-proofing to 14 digits
+    int64_t parsed = std::stoll(h.timestamp);
+    EXPECT_GT(parsed, 1700000000000LL);
+    EXPECT_LT(parsed, 2000000000000LL);
+}
+
+TEST_F(KalshiAuthTest, SignatureExcludesQueryString) {
+    // Kalshi requires signing the path WITHOUT the query string.
+    // Both /markets and /markets?limit=100 at the same timestamp must produce
+    // signatures that verify against the SAME message (ts+method+path_only).
+    auto [priv, pub] = generate_test_rsa_keypair();
+    KalshiAuth auth;
+    ASSERT_TRUE(auth.load_key_from_string(priv));
+    auth.set_api_key_id("k");
+
+    const int64_t ts = 1711234567890LL;
+    auto h_no_q    = auth.make_headers("GET", "/trade-api/v2/markets", ts);
+    auto h_with_q  = auth.make_headers("GET", "/trade-api/v2/markets?limit=100&cursor=abc", ts);
+
+    const std::string expected_message = std::to_string(ts) + "GET/trade-api/v2/markets";
+
+    EXPECT_TRUE(verify_pss(pub, expected_message, h_no_q.signature))
+        << "plain path must verify against ts+method+path";
+    EXPECT_TRUE(verify_pss(pub, expected_message, h_with_q.signature))
+        << "query string must be stripped before signing";
 }
 
 TEST_F(KalshiAuthTest, MakeHeadersWithExplicitTimestamp) {

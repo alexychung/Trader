@@ -35,6 +35,48 @@ TEST(Calibration, ResolveUpdatesTrade) {
     EXPECT_NEAR(logger.total_pnl(), 1.75, 0.01);
 }
 
+TEST(Calibration, ResolveSplitsPnlAcrossMultipleTradesOnSameTicker) {
+    // Two real trades on the same ticker: first at entry 0.50 * 4 contracts = 2.0 notional,
+    // second at entry 0.60 * 6 contracts = 3.6 notional. Total notional = 5.6.
+    // A settlement PnL of $5.60 (won both fills) should split proportionally:
+    //   rec1 = 5.60 * (2.0 / 5.6)  = $2.00
+    //   rec2 = 5.60 * (3.6 / 5.6)  = $3.60
+    // The bug was assigning the full $5.60 to both records → total_pnl = $11.20.
+    CalibrationLogger logger;
+    auto r1 = make_record("MKT1", "weather", 0.70, 0.50);
+    r1.quantity = 4;
+    r1.entry_price = 0.50;
+    logger.log_trade(r1);
+
+    auto r2 = make_record("MKT1", "weather", 0.72, 0.60);
+    r2.quantity = 6;
+    r2.entry_price = 0.60;
+    logger.log_trade(r2);
+
+    logger.resolve("MKT1", true, 5.60);
+
+    EXPECT_EQ(logger.resolved_trades(), 2);
+    EXPECT_NEAR(logger.total_pnl(), 5.60, 0.01);
+}
+
+TEST(Calibration, ResolveDoesNotDoubleCountWhenShadowAndRealShareTicker) {
+    // One real trade + one shadow on the same ticker. Shadow must not
+    // absorb any pnl; real record gets the full settlement amount.
+    CalibrationLogger logger;
+    auto real = make_record("MKT1", "weather", 0.70, 0.50);
+    real.quantity = 10;
+    real.entry_price = 0.50;
+    logger.log_trade(real);
+
+    auto shadow = make_record("MKT1", "weather", 0.80, 0.50);
+    shadow.quantity = 1;
+    logger.log_shadow_prediction(shadow);
+
+    logger.resolve("MKT1", true, 5.00);
+
+    EXPECT_NEAR(logger.total_pnl(), 5.00, 0.01);
+}
+
 TEST(Calibration, BrierScorePerfect) {
     CalibrationLogger logger;
 
@@ -126,4 +168,83 @@ TEST(Calibration, TotalPnlAggregates) {
     logger.resolve("MKT2", false, -2.75);
 
     EXPECT_NEAR(logger.total_pnl(), -1.0, 0.01);
+}
+
+// ===== Rolling Brier / drift detection =====
+
+TEST(Calibration, RollingBrierEmptyReturnsZeroSamples) {
+    CalibrationLogger logger;
+    auto r = logger.rolling_brier_score("weather", 30);
+    EXPECT_EQ(r.num_predictions, 0);
+}
+
+TEST(Calibration, RollingBrierMatchesAllTimeWhenWindowCoversAll) {
+    CalibrationLogger logger;
+    // 5 calibrated predictions — model=0.70, side="yes", 3 yes, 2 no.
+    // per-record error² = (0.70-1)² = 0.09 on wins, (0.70-0)² = 0.49 on losses.
+    for (int i = 0; i < 5; ++i) {
+        auto r = make_record("M" + std::to_string(i), "weather", 0.70, 0.50);
+        logger.log_trade(r);
+    }
+    logger.resolve("M0", true, 0);
+    logger.resolve("M1", true, 0);
+    logger.resolve("M2", true, 0);
+    logger.resolve("M3", false, 0);
+    logger.resolve("M4", false, 0);
+
+    auto all = logger.brier_score("weather");
+    auto rolling = logger.rolling_brier_score("weather", 30);
+    EXPECT_EQ(rolling.num_predictions, all.num_predictions);
+    EXPECT_NEAR(rolling.score, all.score, 1e-9);
+}
+
+TEST(Calibration, RollingBrierCapturesRecentDegradation) {
+    // 10 well-calibrated (model=0.70, 7 wins), then 10 badly-calibrated (model=0.90, all losses).
+    // All-time Brier is diluted; rolling over the last 10 is much worse.
+    CalibrationLogger logger;
+    for (int i = 0; i < 10; ++i) {
+        logger.log_trade(make_record("GOOD" + std::to_string(i), "weather", 0.70, 0.50));
+        logger.resolve("GOOD" + std::to_string(i), i < 7, 0);
+    }
+    for (int i = 0; i < 10; ++i) {
+        logger.log_trade(make_record("BAD" + std::to_string(i), "weather", 0.90, 0.50));
+        logger.resolve("BAD" + std::to_string(i), false, 0);
+    }
+
+    auto all = logger.brier_score("weather");
+    auto rolling = logger.rolling_brier_score("weather", 10);
+
+    EXPECT_EQ(rolling.num_predictions, 10);
+    EXPECT_NEAR(rolling.score, 0.81, 1e-6);          // (0.9-0)² = 0.81 over all 10 recent losses
+    EXPECT_GT(rolling.score, all.score + 0.2);       // rolling much worse than all-time
+}
+
+TEST(Calibration, CategoryAggregateIncludesRollingWindow) {
+    CalibrationLogger logger;
+    for (int i = 0; i < 35; ++i) {
+        logger.log_trade(make_record("M" + std::to_string(i), "weather", 0.60, 0.50));
+        logger.resolve("M" + std::to_string(i), i % 2 == 0, 0);
+    }
+    auto agg = logger.category_aggregate("weather", 30);
+    EXPECT_EQ(agg.rolling_window, 30);
+    EXPECT_GT(agg.rolling_brier, 0.0);
+    EXPECT_LT(agg.rolling_brier, 0.5);
+}
+
+TEST(Calibration, RollingBrierRespectsCategoryFilter) {
+    CalibrationLogger logger;
+    for (int i = 0; i < 5; ++i) {
+        logger.log_trade(make_record("W" + std::to_string(i), "weather", 0.70, 0.50));
+        logger.resolve("W" + std::to_string(i), true, 0);   // weather all won
+    }
+    for (int i = 0; i < 5; ++i) {
+        logger.log_trade(make_record("C" + std::to_string(i), "cpi", 0.70, 0.50));
+        logger.resolve("C" + std::to_string(i), false, 0);  // cpi all lost
+    }
+    auto w = logger.rolling_brier_score("weather", 10);
+    auto c = logger.rolling_brier_score("cpi", 10);
+    EXPECT_NEAR(w.score, 0.09, 1e-6);  // (0.7-1)²
+    EXPECT_NEAR(c.score, 0.49, 1e-6);  // (0.7-0)²
+    EXPECT_EQ(w.num_predictions, 5);
+    EXPECT_EQ(c.num_predictions, 5);
 }

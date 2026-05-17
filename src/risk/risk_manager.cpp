@@ -97,23 +97,32 @@ void RiskManager::on_fill(const std::string& ticker, const std::string& contract
 }
 
 void RiskManager::on_settlement(const std::string& ticker, double pnl) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::string kill_reason;
+    bool fire_kill = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    auto it = positions_.find(ticker);
-    if (it != positions_.end()) {
-        it->second.settled = true;
-        balance_ += it->second.cost + pnl;  // Return cost + profit/loss
-        daily_pnl_ += pnl;
-        active_markets_.erase(ticker);
-    }
+        auto it = positions_.find(ticker);
+        if (it != positions_.end()) {
+            it->second.settled = true;
+            balance_ += it->second.cost + pnl;  // Return cost + profit/loss
+            daily_pnl_ += pnl;
+            active_markets_.erase(ticker);
+        }
 
-    // Check kill switch trigger
-    if (daily_pnl_ <= -config_.kill_switch_loss) {
-        killed_ = true;
-        kill_reason_ = "Daily loss exceeded kill threshold ($" +
-                       std::to_string(-daily_pnl_) + ")";
-        spdlog::critical("KILL SWITCH: {}", kill_reason_);
+        // Check kill switch trigger
+        if (!killed_ && daily_pnl_ <= -config_.kill_switch_loss) {
+            killed_ = true;
+            kill_reason_ = "Daily loss exceeded kill threshold ($" +
+                           std::to_string(-daily_pnl_) + ")";
+            spdlog::critical("KILL SWITCH: {}", kill_reason_);
+            kill_reason = kill_reason_;
+            fire_kill = true;
+        }
     }
+    // Fire outside the lock — the callback may take its own mutex (e.g.
+    // KillSwitch::trigger calls risk_.trigger_kill), avoiding re-entrancy.
+    if (fire_kill && on_kill_) on_kill_(kill_reason);
 }
 
 double RiskManager::total_exposure() const {
@@ -134,16 +143,30 @@ double RiskManager::available_capital() const {
     return balance_ - exposure;  // Note: balance already reduced by fills
 }
 
+int RiskManager::position_quantity(const std::string& ticker) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = positions_.find(ticker);
+    if (it == positions_.end() || it->second.settled) return 0;
+    return it->second.quantity;
+}
+
 int RiskManager::active_market_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return static_cast<int>(active_markets_.size());
 }
 
 void RiskManager::trigger_kill(const std::string& reason) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    killed_ = true;
-    kill_reason_ = reason;
-    spdlog::critical("KILL SWITCH triggered: {}", reason);
+    bool first_trigger = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        first_trigger = !killed_;
+        killed_ = true;
+        kill_reason_ = reason;
+        spdlog::critical("KILL SWITCH triggered: {}", reason);
+    }
+    // Only notify on the false→true edge to avoid re-entrant loops when
+    // KillSwitch::trigger calls us back.
+    if (first_trigger && on_kill_) on_kill_(reason);
 }
 
 void RiskManager::reset_kill() {

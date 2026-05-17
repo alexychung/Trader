@@ -25,6 +25,30 @@ TEST(MarketFilter, PassesGoodWeatherMarket) {
     EXPECT_TRUE(result.passes);
 }
 
+TEST(MarketFilter, FractionalTradingEnabledPassesByDefault) {
+    // Default policy: allow fractional-enabled markets, since on demo every
+    // weather market is fractional-enabled. We submit whole-integer counts
+    // via count_fp="N.00", so inbound truncation is bounded (<1 contract/fill).
+    MarketFilter filter;
+    auto m = make_market("KXHIGHNY-26APR-T75", "weather", 0.60, 0.70, 200);
+    m.fractional_trading_enabled = true;
+    auto result = filter.check(m);
+    EXPECT_TRUE(result.passes);
+}
+
+TEST(MarketFilter, RejectsFractionalTradingEnabledWhenOptedIn) {
+    // With skip_fractional_markets=true, the fractional flag becomes a hard
+    // reject — an escape hatch for operators chasing unexplained P&L drift.
+    FilterConfig cfg;
+    cfg.skip_fractional_markets = true;
+    MarketFilter filter(cfg);
+    auto m = make_market("KXHIGHNY-26APR-T75", "weather", 0.60, 0.70, 200);
+    m.fractional_trading_enabled = true;
+    auto result = filter.check(m);
+    EXPECT_FALSE(result.passes);
+    EXPECT_NE(result.reject_reason.find("Fractional"), std::string::npos);
+}
+
 TEST(MarketFilter, RejectsBlockedCategory) {
     MarketFilter filter;
     auto m = make_market("NBA-GAME", "sports", 0.50, 0.60, 500);
@@ -54,6 +78,38 @@ TEST(MarketFilter, RejectsNarrowSpread) {
     auto result = filter.check(m);
     EXPECT_FALSE(result.passes);
     EXPECT_TRUE(result.reject_reason.find("Spread") != std::string::npos);
+}
+
+TEST(MarketFilter, RejectsWideSpreadPlaceholderBook) {
+    // bid=0.00 / ask=1.00 is a common Kalshi-demo placeholder — it's not
+    // a real two-sided market, just the venue rendering "no quotes".
+    // Spread=1.00 passes the old min_spread=0.03 check trivially; the new
+    // max_spread guard must reject it.
+    MarketFilter filter;
+    auto m = make_market("MKT1", "weather", 0.00, 1.00, 200);
+    auto result = filter.check(m);
+    EXPECT_FALSE(result.passes);
+    EXPECT_TRUE(result.reject_reason.find("wide") != std::string::npos)
+        << "got reject_reason=" << result.reject_reason;
+}
+
+TEST(MarketFilter, AllowsNormalSpreadAtMid) {
+    // 50¢ / 60¢ = 10¢ spread. Within [min_spread=3, max_spread=30].
+    MarketFilter filter;
+    auto m = make_market("MKT1", "weather", 0.50, 0.60, 200);
+    auto result = filter.check(m);
+    EXPECT_TRUE(result.passes) << result.reject_reason;
+}
+
+TEST(MarketFilter, MaxSpreadIsConfigurable) {
+    // A tighter max_spread (e.g. 0.05) rejects what the default lets through.
+    FilterConfig cfg;
+    cfg.max_spread = 0.05;
+    MarketFilter filter(cfg);
+    auto m = make_market("MKT1", "weather", 0.50, 0.60, 200);  // spread=0.10
+    auto result = filter.check(m);
+    EXPECT_FALSE(result.passes);
+    EXPECT_TRUE(result.reject_reason.find("wide") != std::string::npos);
 }
 
 TEST(MarketFilter, RejectsCheapContract) {

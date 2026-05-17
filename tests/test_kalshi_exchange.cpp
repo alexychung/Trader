@@ -27,6 +27,35 @@ TEST_F(KalshiExchangeTest, InitialPositionIsEmpty) {
     EXPECT_DOUBLE_EQ(pos.avg_cost, 0.0);
 }
 
+// ===== Shadow mode =====
+
+TEST_F(KalshiExchangeTest, ShadowModePlaceOrderReturnsEmptyAndTracksNothing) {
+    exchange_->set_shadow_mode(true);
+    EXPECT_TRUE(exchange_->shadow_mode());
+
+    Order o;
+    o.ticker = "KXHIGHNY-26APR-T75";
+    o.side = Side::Buy;
+    o.contract_side = "yes";
+    o.price = 0.55;
+    o.quantity = 3;
+    o.post_only = true;
+    auto id = exchange_->place_order(o);
+    EXPECT_TRUE(id.empty());
+
+    // No tracked orders and no positions should exist — the call never hit
+    // the REST and the tracking path only runs on a non-empty id.
+    EXPECT_TRUE(exchange_->get_open_orders().empty());
+    EXPECT_EQ(exchange_->get_position(o.ticker).quantity, 0);
+}
+
+TEST_F(KalshiExchangeTest, ShadowModeCancelAllIsNoop) {
+    exchange_->set_shadow_mode(true);
+    // Even without open orders, cancel_all must return true (idempotent success).
+    EXPECT_TRUE(exchange_->cancel_all_orders());
+    EXPECT_TRUE(exchange_->cancel_order("synthetic-id"));
+}
+
 TEST_F(KalshiExchangeTest, FillUpdatesPosition) {
     WsFill fill;
     fill.order_id = "ord-1";
@@ -194,4 +223,57 @@ TEST_F(KalshiExchangeTest, CheckSettlementsReturnsSettled) {
     EXPECT_TRUE(settlements[0].outcome);
     EXPECT_DOUBLE_EQ(settlements[0].pnl, 3.0);
     EXPECT_EQ(settlements[0].contracts, 5);
+}
+
+TEST_F(KalshiExchangeTest, OnFillDedupsByTradeId) {
+    // Same trade_id delivered twice — second should be a no-op. This is the
+    // core invariant keeping REST reconciliation safe when WS is also
+    // replaying recent fills post-reconnect.
+    WsFill f{};
+    f.order_id = "o1";
+    f.trade_id = "trade-xyz";
+    f.ticker = "MKT1";
+    f.price = 0.40;
+    f.count = 5;
+    f.side = "yes";
+    f.action = "buy";
+
+    double initial_balance = exchange_->get_balance();
+    exchange_->on_fill(f);
+    double after_first = exchange_->get_balance();
+    exchange_->on_fill(f);  // same trade_id → dedup
+    double after_second = exchange_->get_balance();
+
+    EXPECT_NE(initial_balance, after_first);
+    EXPECT_DOUBLE_EQ(after_first, after_second);
+
+    auto pos = exchange_->get_position("MKT1");
+    EXPECT_EQ(pos.quantity, 5);  // still 5, not 10
+}
+
+TEST_F(KalshiExchangeTest, OnFillBumpsWatermarkMonotonically) {
+    using namespace std::chrono;
+
+    WsFill early{};
+    early.order_id = "o1"; early.trade_id = "t1";
+    early.ticker = "MKT1"; early.price = 0.5; early.count = 1;
+    early.side = "yes"; early.action = "buy";
+    early.timestamp = Timestamp(milliseconds(1'700'000'000'000LL));
+
+    WsFill late = early;
+    late.order_id = "o2"; late.trade_id = "t2";
+    late.timestamp = Timestamp(milliseconds(1'700'000'005'000LL));
+
+    WsFill out_of_order = early;
+    out_of_order.order_id = "o3"; out_of_order.trade_id = "t3";
+    out_of_order.timestamp = Timestamp(milliseconds(1'700'000'002'000LL));
+
+    exchange_->on_fill(early);
+    EXPECT_EQ(exchange_->last_fill_ts_ms(), 1'700'000'000'000LL);
+    exchange_->on_fill(late);
+    EXPECT_EQ(exchange_->last_fill_ts_ms(), 1'700'000'005'000LL);
+    // Out-of-order fill must NOT regress the watermark — otherwise a replay
+    // would re-fetch the later fills on next reconcile.
+    exchange_->on_fill(out_of_order);
+    EXPECT_EQ(exchange_->last_fill_ts_ms(), 1'700'000'005'000LL);
 }

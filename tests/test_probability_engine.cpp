@@ -124,6 +124,33 @@ TEST(WeatherModel, ParseWeatherTickerInvalid) {
     EXPECT_FALSE(info.valid);
 }
 
+// 2026-04 prod format: KXTEMP + IATA + H/L suffix, 4-digit DD+HH in date,
+// decimal °F threshold. Seen live on api.elections.kalshi.com.
+TEST(WeatherModel, ParseWeatherTickerKxtempHigh) {
+    auto info = WeatherEnsembleModel::parse_weather_ticker("KXTEMPNYCH-26APR2310-T70.99");
+    EXPECT_TRUE(info.valid);
+    EXPECT_EQ(info.station_id, "KNYC");
+    EXPECT_DOUBLE_EQ(info.threshold, 70.99);
+    EXPECT_EQ(info.date, "26APR2310");
+}
+
+TEST(WeatherModel, ParseWeatherTickerKxtempLow) {
+    // L-suffixed low-temperature markets share the same parser.
+    auto info = WeatherEnsembleModel::parse_weather_ticker("KXTEMPORDL-26APR2306-T45.5");
+    EXPECT_TRUE(info.valid);
+    EXPECT_EQ(info.station_id, "KORD");
+    EXPECT_DOUBLE_EQ(info.threshold, 45.5);
+}
+
+TEST(WeatherModel, ParseWeatherTickerKxtempNegativeThreshold) {
+    // NFP-style negative thresholds also appear on some KXTEMP markets in
+    // extreme cold; the regex allows a leading minus.
+    auto info = WeatherEnsembleModel::parse_weather_ticker("KXTEMPFAIH-26JAN1510-T-5");
+    EXPECT_TRUE(info.valid);
+    EXPECT_EQ(info.station_id, "KFAI");
+    EXPECT_DOUBLE_EQ(info.threshold, -5.0);
+}
+
 // ===== Full Estimate Pipeline =====
 
 TEST(WeatherModel, EstimateWithEnsembleData) {

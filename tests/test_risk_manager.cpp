@@ -137,6 +137,58 @@ TEST_F(RiskManagerTest, SettlementLossUpdatesPnL) {
     EXPECT_DOUBLE_EQ(rm_->daily_pnl(), -3.0);
 }
 
+TEST_F(RiskManagerTest, SettlementWinReturnsCostPlusPnL) {
+    // Balance accounting is the load-bearing invariant here: on_fill debits
+    // cost up front, on_settlement must return cost + pnl so a winning
+    // ticker ends the cycle with the expected net change in balance.
+    // Miswiring this (e.g. returning only pnl) silently underreports
+    // balance by the ticker's cost on every settlement and the bot
+    // accumulates a phantom loss equal to the week's gross traded volume.
+    rm_->set_balance(100.0);
+    rm_->on_fill("WIN", "yes", 5, 0.40);          // cost $2.00 debited
+    EXPECT_DOUBLE_EQ(rm_->balance(), 98.0);
+
+    rm_->on_settlement("WIN", +3.0);              // +$3 net over cost
+    EXPECT_DOUBLE_EQ(rm_->balance(), 103.0);      // 98 + 2 + 3
+    EXPECT_DOUBLE_EQ(rm_->daily_pnl(), 3.0);
+}
+
+TEST_F(RiskManagerTest, SettlementLossReturnsCostPlusNegativePnL) {
+    // Losing the full cost nets to balance unchanged before-and-after the
+    // cycle (cost returned but pnl == -cost). Invariant: balance after a
+    // total loss == balance before the entry.
+    rm_->set_balance(100.0);
+    rm_->on_fill("LOSE", "yes", 5, 0.60);         // cost $3.00 debited
+    EXPECT_DOUBLE_EQ(rm_->balance(), 97.0);
+
+    rm_->on_settlement("LOSE", -3.0);             // full loss: pnl == -cost
+    EXPECT_DOUBLE_EQ(rm_->balance(), 97.0);       // unchanged
+    EXPECT_DOUBLE_EQ(rm_->daily_pnl(), -3.0);
+}
+
+TEST_F(RiskManagerTest, SettlementRemovesFromExposure) {
+    rm_->on_fill("A", "yes", 5, 0.40);   // $2 exposure
+    rm_->on_fill("B", "yes", 5, 0.30);   // $1.50 exposure
+    EXPECT_DOUBLE_EQ(rm_->total_exposure(), 3.5);
+
+    rm_->on_settlement("A", +1.0);
+    // A is settled; only B's cost remains in exposure.
+    EXPECT_DOUBLE_EQ(rm_->total_exposure(), 1.5);
+}
+
+TEST_F(RiskManagerTest, SettlementWithoutPriorFillIsNoOp) {
+    // Defensive: a settlement event arriving for a ticker the risk manager
+    // never tracked (e.g., position was fully seeded via the REST path and
+    // somehow lost, or the ticker resolved before we knew about it) should
+    // not crash or corrupt daily_pnl.
+    rm_->set_balance(100.0);
+    rm_->on_settlement("UNKNOWN", +5.0);
+
+    EXPECT_DOUBLE_EQ(rm_->balance(), 100.0);
+    EXPECT_DOUBLE_EQ(rm_->daily_pnl(), 0.0);
+    EXPECT_FALSE(rm_->is_killed());
+}
+
 // ===== Kill Switch =====
 
 TEST_F(RiskManagerTest, KillSwitchTriggersOnLoss) {

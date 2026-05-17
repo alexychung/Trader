@@ -23,6 +23,8 @@ struct FredObservation {
     std::string series_id;
     std::string date;       // "2026-03-15"
     double value = 0.0;
+    std::string realtime_start;  // ALFRED: the release window start this value was valid in
+    std::string realtime_end;    // ALFRED: the release window end
 };
 
 // BLS API client
@@ -54,9 +56,17 @@ class FredClient {
 public:
     explicit FredClient(const std::string& api_key = "") : api_key_(api_key) {}
 
-    // Fetch observations for a series
+    // Fetch observations for a series (current revised values).
     std::vector<FredObservation> fetch_series(const std::string& series_id,
                                                int limit = 10);
+
+    // Fetch ALFRED vintage observations: values as they were known on
+    // `vintage_date` (ISO 8601, YYYY-MM-DD). Critical for backtests — using
+    // current FRED values for historical dates introduces look-ahead bias.
+    // Empty vintage_date falls back to current values.
+    std::vector<FredObservation> fetch_series_vintage(const std::string& series_id,
+                                                        const std::string& vintage_date,
+                                                        int limit = 20);
 
     // Parse FRED API JSON response
     static std::vector<FredObservation> parse_response(const nlohmann::json& j,

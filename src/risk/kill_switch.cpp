@@ -77,11 +77,14 @@ void KillSwitch::on_order_success() {
 
 void KillSwitch::execute(IExchange& exchange) {
     spdlog::critical("KILL SWITCH: Cancelling all orders");
-    // Cancel all orders — don't flatten positions on Kalshi
-    // Binary contracts resolve on their own; selling at a loss is usually worse
-    // than holding to settlement
-    exchange.cancel_order("*");  // Implementation-specific: KalshiExchange handles cancel-all
-    spdlog::critical("KILL SWITCH: All orders cancelled. Manual restart required.");
+    // Don't flatten positions — binary contracts resolve on their own;
+    // selling at a loss is usually worse than holding to settlement.
+    if (!exchange.cancel_all_orders()) {
+        spdlog::critical("KILL SWITCH: cancel_all_orders reported failures; "
+                         "operator must inspect venue state manually");
+    } else {
+        spdlog::critical("KILL SWITCH: All orders cancelled. Manual restart required.");
+    }
 }
 
 KillSwitch::StateSnapshot KillSwitch::snapshot() const {

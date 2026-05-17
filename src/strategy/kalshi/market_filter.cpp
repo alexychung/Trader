@@ -1,27 +1,86 @@
 #include "strategy/kalshi/market_filter.hpp"
 #include "core/types.hpp"
+#include <spdlog/spdlog.h>
+#include <cstring>
+#include <unordered_map>
 
 namespace trader::kalshi {
+
+namespace {
+// Derive a logical category from the ticker when the server-provided `category`
+// field is empty. Kalshi deprecated `category` in Mar 2026; demo now returns
+// `""` for every market. Without a fallback, the allowed-categories filter
+// blocks every market. Mapping matches the models we've registered in
+// ProbabilityEngine (weather, economics, fed).
+std::string category_from_ticker(const std::string& ticker) {
+    auto starts_with = [&](const char* p) {
+        std::size_t n = std::strlen(p);
+        return ticker.compare(0, n, p) == 0;
+    };
+    // Weather: high/low temperature, rainfall. KXTEMP* is the 2026 format
+    // (KXTEMPNYCH, KXTEMPORDL, etc.); KXHIGH/KXLOW are legacy.
+    if (starts_with("KXTEMP")  ||
+        starts_with("KXHIGHT") || starts_with("KXLOWT") ||
+        starts_with("KXHIGH")  || starts_with("KXLOW")  ||
+        starts_with("KXRAIN")  || starts_with("KXSNOW")) {
+        return "weather";
+    }
+    // Inflation / CPI / other macro releases. KXUSNFP = Non-Farm Payrolls,
+    // KXJOBLESSCLAIMS = weekly unemployment claims — no model yet but we
+    // still want them routed to "economics" so the filter doesn't drop
+    // them and the bot surfaces shadow data when a model is added later.
+    if (starts_with("KXCPI") || starts_with("KXPCE") || starts_with("KXINFL") ||
+        starts_with("KXUSNFP") || starts_with("KXJOBLESSCLAIMS")) {
+        return "economics";
+    }
+    // Fed policy / rates.
+    if (starts_with("KXFED") || starts_with("KXFFR") || starts_with("KXRATE")) {
+        return "fed";
+    }
+    return "";
+}
+} // namespace
 
 FilteredMarket MarketFilter::check(const KalshiMarket& market) const {
     FilteredMarket result;
     result.market = market;
     result.spread = market.yes_ask - market.yes_bid;
 
-    // Category check
-    if (config_.blocked_categories.count(market.category)) {
-        result.reject_reason = "Blocked category: " + market.category;
+    // Category check — with prefix fallback. Kalshi's `category` field is
+    // being deprecated and already returns empty on demo. Derive from the
+    // ticker when the server didn't set one, so weather/CPI/Fed markets
+    // still route through their registered models.
+    std::string effective_category = market.category;
+    if (effective_category.empty()) {
+        effective_category = category_from_ticker(market.ticker);
+    }
+    if (config_.blocked_categories.count(effective_category)) {
+        result.reject_reason = "Blocked category: " + effective_category;
         return result;
     }
     if (!config_.allowed_categories.empty() &&
-        !config_.allowed_categories.count(market.category)) {
-        result.reject_reason = "Category not in allowed list: " + market.category;
+        !config_.allowed_categories.count(effective_category)) {
+        result.reject_reason = "Category not in allowed list: " +
+            (effective_category.empty() ? std::string("<unknown>") : effective_category);
+        return result;
+    }
+    // Backfill the category on the output so downstream code (strategy,
+    // calibration) doesn't need to re-derive it per market.
+    result.market.category = effective_category;
+
+    // Status check. Kalshi has used both "open" (legacy) and "active" (current
+    // demo + prod response) for tradeable markets — accept both. Any other
+    // value ("closed", "settled", "determined", "finalized") is terminal.
+    if (market.status != "open" && market.status != "active") {
+        result.reject_reason = "Market not tradeable: " + market.status;
         return result;
     }
 
-    // Status check
-    if (market.status != "open") {
-        result.reject_reason = "Market not open: " + market.status;
+    // Fractional-trading guard — opt-in. See FilterConfig comment. Default
+    // is to allow these markets because on demo every weather market is
+    // fractional-enabled and skipping them empties the category.
+    if (config_.skip_fractional_markets && market.fractional_trading_enabled) {
+        result.reject_reason = "Fractional trading enabled — skipped by config";
         return result;
     }
 
@@ -31,7 +90,12 @@ FilteredMarket MarketFilter::check(const KalshiMarket& market) const {
         return result;
     }
 
-    // Spread check
+    // Spread check — both sides. Narrow means illiquid/no-edge; wide means
+    // placeholder book (bid=0.00/ask=1.00 is common on Kalshi demo).
+    if (result.spread > config_.max_spread) {
+        result.reject_reason = "Spread too wide: " + std::to_string(result.spread);
+        return result;
+    }
     if (result.spread < config_.min_spread) {
         result.reject_reason = "Spread too narrow: " + std::to_string(result.spread);
         return result;
@@ -50,10 +114,29 @@ FilteredMarket MarketFilter::check(const KalshiMarket& market) const {
 
 std::vector<FilteredMarket> MarketFilter::filter(const std::vector<KalshiMarket>& markets) const {
     std::vector<FilteredMarket> results;
+    // Summarize rejection reasons so we can tell at a glance why N of M
+    // markets were dropped. Per-market spdlog would flood at 240+ markets/tick;
+    // a reason histogram is compact and actionable.
+    std::unordered_map<std::string, int> reject_counts;
+    std::unordered_map<std::string, std::string> reject_examples;
     for (const auto& market : markets) {
         auto checked = check(market);
         if (checked.passes) {
             results.push_back(checked);
+        } else {
+            // Truncate the reason to the stable prefix so e.g. "Volume too
+            // low: 3" and "Volume too low: 7" aggregate together.
+            std::string key = checked.reject_reason;
+            auto colon = key.find(':');
+            if (colon != std::string::npos) key.resize(colon);
+            ++reject_counts[key];
+            reject_examples.try_emplace(key, market.ticker + ": " + checked.reject_reason);
+        }
+    }
+    if (!reject_counts.empty()) {
+        for (const auto& [reason, count] : reject_counts) {
+            spdlog::info("MarketFilter: {}x \"{}\" (e.g. {})",
+                         count, reason, reject_examples[reason]);
         }
     }
     return results;

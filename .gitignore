@@ -17,9 +17,11 @@ vcpkg_installed/
 config/config.yaml
 secrets/
 
-# Data
-data/cache/
-data/calibration.db
+# Data (runtime state — never commit)
+# Catch-all: every generated artifact under data/ is runtime state (caches,
+# calibration, backtest output, SQLite sidecars). Add explicit allow-lists
+# (!data/<name>) if anything in data/ ever needs to be tracked.
+data/**
 logs/
 
 # OS
@@ -31,3 +33,6 @@ Desktop.ini
 
 # Working memory
 .wm/
+
+# Local Claude Code session state
+.claude/

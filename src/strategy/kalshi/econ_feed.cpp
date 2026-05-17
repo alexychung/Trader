@@ -1,6 +1,8 @@
 #include "strategy/kalshi/econ_feed.hpp"
+#include "core/http.hpp"
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <sstream>
 
 namespace trader::kalshi {
 
@@ -10,7 +12,26 @@ std::vector<BlsDataPoint> BlsClient::fetch_series(const std::string& series_id,
                                                     const std::string& start_year,
                                                     const std::string& end_year) {
     spdlog::debug("BLS fetch: {} ({}-{})", series_id, start_year, end_year);
-    return {};  // Production: HTTP POST to api.bls.gov
+
+    nlohmann::json body;
+    body["seriesid"] = nlohmann::json::array({series_id});
+    body["startyear"] = start_year;
+    body["endyear"] = end_year;
+    if (!api_key_.empty()) body["registrationkey"] = api_key_;
+
+    auto resp = https_post_json("https://api.bls.gov/publicAPI/v2/timeseries/data/",
+                                body.dump());
+    if (!resp.ok()) {
+        spdlog::warn("BLS fetch {} failed: HTTP {}", series_id, resp.status_code);
+        return {};
+    }
+
+    try {
+        return parse_response(nlohmann::json::parse(resp.body), series_id);
+    } catch (const nlohmann::json::exception& e) {
+        spdlog::error("BLS parse failed for {}: {}", series_id, e.what());
+        return {};
+    }
 }
 
 std::vector<BlsDataPoint> BlsClient::parse_response(const nlohmann::json& j,
@@ -77,10 +98,65 @@ std::optional<double> BlsClient::compute_mom_change(const std::vector<BlsDataPoi
 
 // ===== FRED Client =====
 
+static std::string build_fred_url(const std::string& series_id,
+                                   const std::string& api_key,
+                                   int limit,
+                                   const std::string& vintage_date) {
+    std::ostringstream url;
+    url << "https://api.stlouisfed.org/fred/series/observations"
+        << "?series_id=" << series_id
+        << "&file_type=json"
+        << "&sort_order=desc"
+        << "&limit=" << limit;
+    if (!api_key.empty()) url << "&api_key=" << api_key;
+    if (!vintage_date.empty()) {
+        // ALFRED: realtime_start=realtime_end=vintage_date selects the single
+        // release window that covers that as-of date.
+        url << "&realtime_start=" << vintage_date
+            << "&realtime_end=" << vintage_date;
+    }
+    return url.str();
+}
+
 std::vector<FredObservation> FredClient::fetch_series(const std::string& series_id,
                                                         int limit) {
     spdlog::debug("FRED fetch: {} (limit {})", series_id, limit);
-    return {};  // Production: HTTP GET from api.stlouisfed.org
+    auto url = build_fred_url(series_id, api_key_, limit, "");
+    auto resp = https_get(url);
+    if (!resp.ok()) {
+        spdlog::warn("FRED fetch {} failed: HTTP {}", series_id, resp.status_code);
+        return {};
+    }
+    try {
+        auto obs = parse_response(nlohmann::json::parse(resp.body), series_id);
+        // FRED returns newest-first when sort_order=desc; callers expect oldest-first.
+        std::reverse(obs.begin(), obs.end());
+        return obs;
+    } catch (const nlohmann::json::exception& e) {
+        spdlog::error("FRED parse failed for {}: {}", series_id, e.what());
+        return {};
+    }
+}
+
+std::vector<FredObservation> FredClient::fetch_series_vintage(const std::string& series_id,
+                                                                const std::string& vintage_date,
+                                                                int limit) {
+    spdlog::debug("ALFRED fetch: {} as-of {}", series_id, vintage_date);
+    auto url = build_fred_url(series_id, api_key_, limit, vintage_date);
+    auto resp = https_get(url);
+    if (!resp.ok()) {
+        spdlog::warn("ALFRED fetch {} as-of {} failed: HTTP {}",
+                     series_id, vintage_date, resp.status_code);
+        return {};
+    }
+    try {
+        auto obs = parse_response(nlohmann::json::parse(resp.body), series_id);
+        std::reverse(obs.begin(), obs.end());
+        return obs;
+    } catch (const nlohmann::json::exception& e) {
+        spdlog::error("ALFRED parse failed for {}: {}", series_id, e.what());
+        return {};
+    }
 }
 
 std::vector<FredObservation> FredClient::parse_response(const nlohmann::json& j,
@@ -94,6 +170,8 @@ std::vector<FredObservation> FredClient::parse_response(const nlohmann::json& j,
         FredObservation o;
         o.series_id = series_id;
         o.date = obs.value("date", "");
+        o.realtime_start = obs.value("realtime_start", "");
+        o.realtime_end = obs.value("realtime_end", "");
 
         std::string val_str = obs.value("value", ".");
         if (val_str == "." || val_str.empty()) continue;  // FRED uses "." for missing

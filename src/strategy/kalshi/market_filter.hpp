@@ -13,10 +13,29 @@ struct FilterConfig {
     std::unordered_set<std::string> blocked_categories = {"sports", "crypto", "company"};
     int min_volume = 50;
     double min_spread = 0.03;
+    // Upper bound on spread. A bid=0.00/ask=1.00 market has spread=1.00 and
+    // technically passes min_spread — but it's a placeholder book with no
+    // liquidity, not a tradeable quote. Observed on demo: these "wide empty"
+    // books dominated the post-filter set and produced no useful shadows.
+    // Default 0.30 lets legitimate wide markets through (early-morning CPI
+    // brackets run 15-25¢) but cuts the trivial 100¢ placeholders.
+    double max_spread = 0.30;
     double min_price = 0.15;    // Skip cheap contracts (favorite-longshot bias)
     double max_price = 0.85;
     int max_days_to_resolution_weather = 7;
     int max_days_to_resolution_econ = 30;
+    // Whether to skip markets with server-side fractional trading enabled.
+    // Rationale for skipping: our strategy/position layer is int-quantity, so
+    // a fractional fill (e.g. 10.50 contracts from a partial-match) silently
+    // truncates on parse — balance drifts. Rationale for allowing: on demo
+    // (and increasingly on prod), ALL weather markets are fractional-enabled;
+    // skipping them loses the whole category. Safe middle ground: allow, but
+    // we always submit whole-integer counts via count_fp="N.00", so the only
+    // exposure is inbound fills — and our parse_kalshi_count_fp truncates
+    // those toward zero, which costs at most 0.99 contracts of P&L per fill.
+    // Default: allow; flip to true only if you observe P&L drift you can't
+    // explain from fractional fills.
+    bool skip_fractional_markets = false;
 };
 
 struct FilteredMarket {

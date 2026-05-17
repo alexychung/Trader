@@ -100,6 +100,33 @@ TEST_F(KalshiWsTest, ParseFillMessageEmpty) {
     EXPECT_FALSE(fill.has_value());
 }
 
+TEST_F(KalshiWsTest, ParseFillMessageRejectsPublicTradeTape) {
+    // Public trade-tape messages have ticker + price but no order_id. These
+    // must not be treated as account fills — doing so would apply their cost
+    // to order_id="" and drain balance silently.
+    nlohmann::json j = {
+        {"ticker", "KXHIGHNY-26APR-T75"},
+        {"price", "0.6500"},
+        {"count", 5},
+        {"taker_side", "yes"}
+    };
+    auto fill = KalshiWsClient::parse_fill_message(j);
+    EXPECT_FALSE(fill.has_value());
+}
+
+TEST_F(KalshiWsTest, ParseFillMessageRejectsMissingAction) {
+    // A fill without action ("buy"/"sell") has no defined balance direction.
+    nlohmann::json j = {
+        {"order_id", "ord-abc-123"},
+        {"ticker", "KXHIGHNY-26APR-T75"},
+        {"price", "0.6500"},
+        {"count", 5},
+        {"side", "yes"}
+    };
+    auto fill = KalshiWsClient::parse_fill_message(j);
+    EXPECT_FALSE(fill.has_value());
+}
+
 // ===== Book State Management =====
 
 TEST_F(KalshiWsTest, BookStateUpdatesOnTickerMessage) {
@@ -211,6 +238,97 @@ TEST_F(KalshiWsTest, ErrorCallbackOnInvalidJson) {
     ws_->process_message("not valid json {{{");
 
     EXPECT_FALSE(error_msg.empty());
+}
+
+// ===== Timestamp Parsing (ts_ms vs deprecated ts) =====
+
+TEST_F(KalshiWsTest, ParsesTsMsWhenPresent) {
+    nlohmann::json j = {
+        {"market_ticker", "MKT1"},
+        {"yes_bid", "0.50"}, {"yes_ask", "0.55"},
+        {"ts_ms", 1744200000123LL}
+    };
+    auto update = KalshiWsClient::parse_ticker_message(j);
+    ASSERT_TRUE(update.has_value());
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        update->timestamp.time_since_epoch()).count();
+    EXPECT_EQ(ms, 1744200000123LL);
+}
+
+TEST_F(KalshiWsTest, FallsBackToSecondsTsWhenTsMsAbsent) {
+    nlohmann::json j = {
+        {"market_ticker", "MKT1"},
+        {"yes_bid", "0.50"}, {"yes_ask", "0.55"},
+        {"ts", 1744200000LL}
+    };
+    auto update = KalshiWsClient::parse_ticker_message(j);
+    ASSERT_TRUE(update.has_value());
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        update->timestamp.time_since_epoch()).count();
+    EXPECT_EQ(ms, 1744200000000LL);
+}
+
+TEST_F(KalshiWsTest, TsMsTakesPrecedenceOverDeprecatedTs) {
+    nlohmann::json j = {
+        {"market_ticker", "MKT1"},
+        {"yes_bid", "0.50"}, {"yes_ask", "0.55"},
+        {"ts_ms", 1744200000999LL},
+        {"ts", 1700000000LL}   // deprecated, should be ignored
+    };
+    auto update = KalshiWsClient::parse_ticker_message(j);
+    ASSERT_TRUE(update.has_value());
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        update->timestamp.time_since_epoch()).count();
+    EXPECT_EQ(ms, 1744200000999LL);
+}
+
+// ===== Orderbook sequence gap detection =====
+
+TEST_F(KalshiWsTest, NoGapAcrossConsecutiveSeqs) {
+    int gap_count = 0;
+    ws_->set_on_seq_gap([&](const std::string&, const std::string&, int64_t, int64_t) {
+        ++gap_count;
+    });
+    ws_->process_message(R"({"type":"orderbook_delta","msg":{"market_ticker":"MKT1","yes_bid":"0.50","yes_ask":"0.55","seq":10}})");
+    ws_->process_message(R"({"type":"orderbook_delta","msg":{"market_ticker":"MKT1","yes_bid":"0.51","yes_ask":"0.55","seq":11}})");
+    ws_->process_message(R"({"type":"orderbook_delta","msg":{"market_ticker":"MKT1","yes_bid":"0.52","yes_ask":"0.55","seq":12}})");
+    EXPECT_EQ(gap_count, 0);
+    EXPECT_EQ(ws_->last_seq("orderbook_delta", "MKT1"), 12);
+}
+
+TEST_F(KalshiWsTest, DetectsSeqGap) {
+    std::string gap_channel, gap_ticker;
+    int64_t expected = 0, received = 0;
+    int gap_count = 0;
+    ws_->set_on_seq_gap([&](const std::string& ch, const std::string& t, int64_t e, int64_t r) {
+        gap_channel = ch; gap_ticker = t; expected = e; received = r; ++gap_count;
+    });
+    ws_->process_message(R"({"type":"orderbook_delta","msg":{"market_ticker":"MKT1","yes_bid":"0.50","yes_ask":"0.55","seq":10}})");
+    ws_->process_message(R"({"type":"orderbook_delta","msg":{"market_ticker":"MKT1","yes_bid":"0.52","yes_ask":"0.55","seq":13}})");
+
+    EXPECT_EQ(gap_count, 1);
+    EXPECT_EQ(gap_channel, "orderbook_delta");
+    EXPECT_EQ(gap_ticker, "MKT1");
+    EXPECT_EQ(expected, 11);
+    EXPECT_EQ(received, 13);
+}
+
+TEST_F(KalshiWsTest, GapDropsLocalBookUntilResync) {
+    ws_->process_message(R"({"type":"orderbook_delta","msg":{"market_ticker":"MKT1","yes_bid":"0.50","yes_ask":"0.55","seq":10}})");
+    EXPECT_DOUBLE_EQ(ws_->get_book_state("MKT1").yes_bid, 0.50);
+
+    // Gap — book should be cleared to prevent acting on stale state.
+    ws_->process_message(R"({"type":"orderbook_delta","msg":{"market_ticker":"MKT1","yes_bid":"0.99","yes_ask":"1.00","seq":15}})");
+    EXPECT_DOUBLE_EQ(ws_->get_book_state("MKT1").yes_bid, 0.0);
+
+    // Fresh snapshot re-seeds the book and seq baseline.
+    ws_->process_message(R"({"type":"orderbook_snapshot","msg":{"market_ticker":"MKT1","yes_bid":"0.60","yes_ask":"0.65","seq":20}})");
+    EXPECT_DOUBLE_EQ(ws_->get_book_state("MKT1").yes_bid, 0.60);
+
+    int gap_count = 0;
+    ws_->set_on_seq_gap([&](const std::string&, const std::string&, int64_t, int64_t) { ++gap_count; });
+    ws_->process_message(R"({"type":"orderbook_delta","msg":{"market_ticker":"MKT1","yes_bid":"0.61","yes_ask":"0.65","seq":21}})");
+    EXPECT_EQ(gap_count, 0);
 }
 
 // ===== Connection State =====

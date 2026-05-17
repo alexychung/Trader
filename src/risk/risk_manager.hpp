@@ -2,6 +2,7 @@
 
 #include "core/types.hpp"
 #include "core/config.hpp"
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -40,6 +41,7 @@ public:
     double daily_pnl() const { return daily_pnl_; }
     int active_market_count() const;
     double balance() const { return balance_; }
+    int position_quantity(const std::string& ticker) const;
 
     // Set/update balance
     void set_balance(double b) { balance_ = b; }
@@ -49,6 +51,13 @@ public:
     bool is_killed() const { return killed_; }
     void trigger_kill(const std::string& reason);
     void reset_kill();
+
+    // Register a callback invoked whenever the kill flag flips from false to
+    // true. Used by main() to bind KillSwitch::trigger so the switch sees the
+    // event immediately rather than on the next tick-loop poll.
+    void set_on_kill(std::function<void(const std::string&)> cb) {
+        on_kill_ = std::move(cb);
+    }
 
     // Daily reset (called at midnight UTC)
     void reset_daily();
@@ -66,6 +75,8 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, RiskPosition> positions_;
     std::unordered_set<std::string> active_markets_;
+
+    std::function<void(const std::string&)> on_kill_;
 };
 
 } // namespace trader

@@ -100,8 +100,14 @@ KalshiAuth::AuthHeaders KalshiAuth::make_headers(const std::string& method, cons
 }
 
 KalshiAuth::AuthHeaders KalshiAuth::make_headers(const std::string& method, const std::string& path, int64_t ts_ms) const {
+    // Kalshi signs the path without the query string. Including "?..." causes silent 401s.
+    std::string path_only = path;
+    if (auto q = path_only.find('?'); q != std::string::npos) {
+        path_only.resize(q);
+    }
+
     std::string ts_str = std::to_string(ts_ms);
-    std::string message = ts_str + method + path;
+    std::string message = ts_str + method + path_only;
     std::string signature = sign(message);
 
     return AuthHeaders{

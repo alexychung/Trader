@@ -6,9 +6,14 @@ using namespace trader::kalshi;
 
 // ===== Station Data =====
 
-TEST(WeatherFeed, KalshiStationsHaveSixEntries) {
+TEST(WeatherFeed, KalshiStationsContainLegacySix) {
     auto stations = kalshi_weather_stations();
-    EXPECT_EQ(stations.size(), 6u);
+    EXPECT_GE(stations.size(), 6u);
+    for (const auto& id : {"KNYC","KORD","KMIA","KLAX","KDEN","KAUS"}) {
+        auto it = std::find_if(stations.begin(), stations.end(),
+                               [&](const auto& s) { return s.id == id; });
+        EXPECT_NE(it, stations.end()) << "missing legacy station " << id;
+    }
 }
 
 TEST(WeatherFeed, StationDataCorrect) {

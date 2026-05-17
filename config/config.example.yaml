@@ -1,14 +1,29 @@
 # Trader Configuration Template
-# Copy to config.yaml and fill in your API keys
+# Copy to config.yaml and fill in your API keys.
+# Live mode also requires the --confirm-live CLI flag every session.
 
 venue: "kalshi"
 mode: "paper"  # "paper" or "live"
 
+# Two sets of Kalshi credentials. Loader picks `demo` when mode=paper,
+# `prod` when mode=live. Demo and prod keys are created separately at
+# demo.kalshi.co and kalshi.com respectively and are not interchangeable.
 kalshi:
-  api_base: "https://demo-api.kalshi.co/trade-api/v2"
-  ws_url: "wss://demo-api.kalshi.co/trade-api/ws/v2"
-  api_key_file: "secrets/kalshi_api_key.pem"
-  api_key_id: "YOUR_API_KEY_ID"
+  demo:
+    api_base: "https://demo-api.kalshi.co/trade-api/v2"
+    ws_url: "wss://demo-api.kalshi.co/trade-api/ws/v2"
+    api_key_file: "secrets/kalshi_api_key_demo.pem"
+    api_key_id: "YOUR_DEMO_API_KEY_ID"
+  prod:
+    api_base: "https://api.elections.kalshi.com/trade-api/v2"
+    ws_url: "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    api_key_file: "secrets/kalshi_api_key_prod.pem"
+    api_key_id: "YOUR_PROD_API_KEY_ID"
+
+paths:
+  data_dir: "data"
+  state_file: "data/state.json"
+  calibration_file: "data/calibration.json"
 
 # Phase 2 (unused for now)
 dydx:
@@ -34,10 +49,39 @@ feeds:
     api_key: "YOUR_FRED_API_KEY"
 
 strategy:
-  min_edge_threshold: 0.05
+  # Minimum edge before a trade fires. 8¢ clears round-trip maker fees
+  # (~1.7¢) + safety buffer (1¢) + a margin for ensemble noise. Drop to
+  # 0.05 only if you're comfortable with edges that barely clear fees.
+  min_edge_threshold: 0.08
+  # Minimum model confidence. WeatherEnsembleModel scales confidence by
+  # ensemble agreement × data completeness; sub-0.3 signals are noise.
+  min_confidence: 0.30
   min_spread_to_mm: 0.08
   kelly_fraction: 0.25
   tick_interval_seconds: 60
+  # When true, only settled-max weather signals (post-peak observations
+  # locked, near-certain outcomes) fire real trades. Ensemble predictions
+  # still shadow-log for calibration. The conservative live posture: at
+  # $100 bankroll ensemble edge is unproven, settled-max is defensible.
+  # Flip to false once the live Brier score for ensemble predictions has
+  # beaten the market baseline over several weeks of shadow data.
+  settled_max_only: true
+
+# Market-filter thresholds. These are the dominant knob between a bot that
+# trades constantly (loose) and one that sits on its hands (tight). Demo
+# books are thin — you may want to relax min_volume to 10 to see any
+# shadow predictions fire. Prod has real liquidity — keep these tight.
+#
+# min_spread / max_spread cut two failure modes:
+#   - too narrow: no edge room (fees eat it)
+#   - too wide:   placeholder books (bid=0, ask=1) that aren't real markets
+filter:
+  min_volume: 50           # contracts ever traded on this market
+  min_spread: 0.03         # 3¢ — tighter than this and fees eat the edge
+  max_spread: 0.30         # 30¢ — wider and it's probably a placeholder book
+  min_price: 0.15          # skip cheap contracts (favorite-longshot bias)
+  max_price: 0.85
+  skip_fractional_markets: false  # allow fractional-enabled markets by default
 
 logging:
   level: "info"
