@@ -20,6 +20,8 @@
 #include "strategy/kalshi/calibration.hpp"
 #include "strategy/kalshi/adaptive_sizer.hpp"
 #include "strategy/kalshi/probability_calibrator.hpp"
+#include "strategy/nba/nba_score_feed.hpp"
+#include "strategy/nba/nba_strategy.hpp"
 #include "risk/risk_manager.hpp"
 #include "risk/kill_switch.hpp"
 #include "risk/cluster_limiter.hpp"
@@ -265,6 +267,33 @@ int main(int argc, char* argv[]) {
 
     OrderManager order_manager(exchange);
 
+    // --- NBA strategy (optional, gated on config.nba.enabled) ---
+    // Lives alongside the weather strategy; shares the same exchange, risk
+    // manager, calibration log, and order placement path. Markets are
+    // separated by ticker prefix (KXNBAGAME-* for NBA, KXTEMP*/KXCPI*/etc
+    // for weather/econ).
+    std::unique_ptr<trader::nba::NbaScoreFeed> nba_score_feed;
+    std::unique_ptr<trader::nba::NbaStrategy> nba_strategy;
+    if (config.nba.enabled) {
+        nba_score_feed = std::make_unique<trader::nba::NbaScoreFeed>();
+        trader::nba::NbaStrategy::Config ncfg;
+        ncfg.min_edge_threshold           = config.nba.min_edge_threshold;
+        ncfg.max_spread                   = config.nba.max_spread;
+        ncfg.min_seconds_remaining        = config.nba.min_seconds_remaining;
+        ncfg.max_seconds_remaining        = config.nba.max_seconds_remaining;
+        ncfg.max_position_per_game_dollars = config.nba.max_position_per_game_dollars;
+        ncfg.kelly_fraction               = config.nba.kelly_fraction;
+        ncfg.scoreboard_poll_interval     = std::chrono::seconds(config.nba.scoreboard_poll_seconds);
+        nba_strategy = std::make_unique<trader::nba::NbaStrategy>(
+            risk_manager, calibration, *nba_score_feed, ncfg);
+        spdlog::info("NBA strategy: ENABLED (edge≥{:.2f}, ${}/game cap, poll {}s)",
+                     ncfg.min_edge_threshold,
+                     ncfg.max_position_per_game_dollars,
+                     config.nba.scoreboard_poll_seconds);
+    } else {
+        spdlog::info("NBA strategy: disabled (set nba.enabled=true to activate)");
+    }
+
     // --- Wire feed events to strategy ---
     feed_manager.set_callback([&](const FeedEvent& event) {
         if (event.type == FeedEvent::Type::WeatherEnsemble) {
@@ -284,6 +313,7 @@ int main(int argc, char* argv[]) {
         mu.last_price = update.last_price;
         mu.volume = update.volume;
         strategy.on_market_update(mu);
+        if (nba_strategy) nba_strategy->on_market_update(mu);
         kill_switch.on_heartbeat();
     });
 
@@ -528,9 +558,12 @@ int main(int argc, char* argv[]) {
                 // KXTEMPNYCH (24 open) and KXUSNFP (15 open) live; legacy
                 // KXHIGH* absent. Re-run trader_catalog_inspect.exe when
                 // 0/N markets kept persists — format drift is the usual cause.
+                std::vector<std::string> prefixes = {
+                    "KXTEMP", "KXHIGHT", "KXHIGH", "KXCPI", "KXPCE",
+                    "KXFEDDISSENT", "KXFEDCOMBO", "KXUSNFP", "KXJOBLESSCLAIMS"};
+                if (nba_strategy) prefixes.push_back("KXNBAGAME");
                 exchange.rest().refresh_markets_by_ticker_prefix(
-                    {"KXTEMP", "KXHIGHT", "KXHIGH", "KXCPI", "KXPCE",
-                     "KXFEDDISSENT", "KXFEDCOMBO", "KXUSNFP", "KXJOBLESSCLAIMS"},
+                    prefixes,
                     {"INFLATION", "MENTION"});
                 last_market_refresh = now;
             }
@@ -544,6 +577,18 @@ int main(int argc, char* argv[]) {
             market_list.reserve(cached.size());
             for (const auto& [t, m] : cached) market_list.push_back(m);
             strategy.set_markets(market_list);
+
+            // Hand the NBA subset to the NBA strategy. Cheap (only KXNBAGAME-*)
+            // and avoids walking the full cache inside the strategy.
+            if (nba_strategy) {
+                std::vector<KalshiMarket> nba_markets;
+                for (const auto& m : market_list) {
+                    if (m.ticker.rfind("KXNBAGAME-", 0) == 0) {
+                        nba_markets.push_back(m);
+                    }
+                }
+                nba_strategy->set_markets(nba_markets);
+            }
 
             // Subscribe to tickers for cached markets. WS client dedups by (channel, ticker),
             // so repeated calls across ticks are safe. Cap to bound outbound WS subscribe traffic.
@@ -560,6 +605,15 @@ int main(int argc, char* argv[]) {
             edge_detector.set_bankroll(effective_bk);
 
             auto signals = strategy.generate_signals();
+
+            // NBA signals are folded into the same emission loop below — same
+            // exchange, same risk manager, same order placement.
+            if (nba_strategy) {
+                auto nba_signals = nba_strategy->generate_signals();
+                signals.insert(signals.end(),
+                                std::make_move_iterator(nba_signals.begin()),
+                                std::make_move_iterator(nba_signals.end()));
+            }
 
             for (const auto& signal : signals) {
                 if (kill_switch.is_active()) break;
@@ -622,6 +676,7 @@ int main(int argc, char* argv[]) {
                 settl.outcome = s.outcome;
                 settl.pnl = s.pnl;
                 strategy.on_settlement(settl);
+                if (nba_strategy) nba_strategy->on_settlement(settl);
                 risk_manager.on_settlement(s.ticker, s.pnl);
                 cluster_limiter.on_settlement(s.ticker);
                 state.cumulative_pnl += s.pnl;

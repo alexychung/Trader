@@ -83,6 +83,30 @@ filter:
   max_price: 0.85
   skip_fractional_markets: false  # allow fractional-enabled markets by default
 
+# NBA in-game trading strategy. Disabled by default. When enabled, runs
+# alongside the weather/econ strategy — shares the same exchange, risk
+# manager, calibration log. NBA signals are generated from the arcsine
+# safe-lead model (Clauset/Kogan/Redner 2015) against live game state polled
+# from cdn.nba.com.
+#
+# Live data source: https://cdn.nba.com/static/json/liveData/scoreboard/
+# todaysScoreboard_00.json  (no API key, browser-like UA required — handled).
+#
+# IMPORTANT: at $100-$700 bankroll with max_position_per_game_dollars=$50,
+# the strategy can request up to ~100 contracts per market. The global
+# `risk.max_position_per_market` defaults to 10 (weather sizing). Raise it
+# to 100-200 for NBA play or NBA signals will get gated by the risk
+# manager.
+nba:
+  enabled: false
+  min_edge_threshold: 0.04            # |home_wp - market_mid| floor
+  max_spread: 0.10                    # skip markets wider than this
+  min_seconds_remaining: 60           # skip final minute (model breaks)
+  max_seconds_remaining: 1440         # skip first half (talent gap dominates)
+  max_position_per_game_dollars: 50.0 # per-market dollar cap
+  kelly_fraction: 0.25                # fractional Kelly multiplier
+  scoreboard_poll_seconds: 5          # cdn.nba.com is ~3-5s fresh
+
 logging:
   level: "info"
   file: "logs/trader.log"

@@ -43,7 +43,8 @@ ParsedUrl parse_absolute_url(const std::string& url) {
 }
 
 HttpResult do_request(http::verb verb, const std::string& url,
-                      const std::string* json_body) {
+                      const std::string* json_body,
+                      const std::vector<std::pair<std::string, std::string>>* extra_headers) {
     auto parsed = parse_absolute_url(url);
     if (!parsed.valid) return {0, "invalid url: " + url};
     if (parsed.scheme != "https") {
@@ -88,6 +89,14 @@ HttpResult do_request(http::verb verb, const std::string& url,
             req.body() = *json_body;
             req.prepare_payload();
         }
+        // Apply caller-provided header overrides last so they win over defaults.
+        // An empty value erases the header (Beast erase is by name, case-insensitive).
+        if (extra_headers) {
+            for (const auto& [name, value] : *extra_headers) {
+                req.erase(name);
+                if (!value.empty()) req.set(name, value);
+            }
+        }
 
         beast::get_lowest_layer(stream).expires_after(kOpTimeout);
         http::write(stream, req);
@@ -111,11 +120,17 @@ HttpResult do_request(http::verb verb, const std::string& url,
 } // namespace
 
 HttpResult https_get(const std::string& url) {
-    return do_request(http::verb::get, url, nullptr);
+    return do_request(http::verb::get, url, nullptr, nullptr);
 }
 
 HttpResult https_post_json(const std::string& url, const std::string& json_body) {
-    return do_request(http::verb::post, url, &json_body);
+    return do_request(http::verb::post, url, &json_body, nullptr);
+}
+
+HttpResult https_get_with_headers(
+    const std::string& url,
+    const std::vector<std::pair<std::string, std::string>>& extra_headers) {
+    return do_request(http::verb::get, url, nullptr, &extra_headers);
 }
 
 } // namespace trader

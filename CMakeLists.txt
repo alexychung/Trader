@@ -45,6 +45,10 @@ add_library(trader_core STATIC
     src/strategy/kalshi/probability_calibrator.cpp
     src/strategy/kalshi/brier_aggregator.cpp
     src/strategy/kalshi/event_strategy.cpp
+    src/strategy/nba/win_probability.cpp
+    src/strategy/nba/kalshi_nba_parser.cpp
+    src/strategy/nba/nba_score_feed.cpp
+    src/strategy/nba/nba_strategy.cpp
     src/core/dashboard.cpp
     src/risk/risk_manager.cpp
     src/risk/kill_switch.cpp
@@ -92,6 +96,11 @@ target_link_libraries(trader_catalog_inspect PRIVATE trader_core)
 add_executable(trader_portfolio_check src/tools/portfolio_check.cpp)
 target_link_libraries(trader_portfolio_check PRIVATE trader_core)
 
+# NBA smoke test — fetches today's scoreboard from cdn.nba.com and prints
+# games + our arcsine WP + expected Kalshi ticker. No Kalshi auth required.
+add_executable(trader_nba_smoke src/tools/nba_smoke.cpp)
+target_link_libraries(trader_nba_smoke PRIVATE trader_core)
+
 # Tests
 enable_testing()
 add_executable(trader_tests
@@ -133,6 +142,10 @@ add_executable(trader_tests
     tests/test_mock_exchange.cpp
     tests/test_backtest_driver.cpp
     tests/test_position_seeding.cpp
+    tests/test_nba_win_probability.cpp
+    tests/test_nba_kalshi_parser.cpp
+    tests/test_nba_score_feed.cpp
+    tests/test_nba_strategy.cpp
 )
 target_link_libraries(trader_tests PRIVATE
     trader_core

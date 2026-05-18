@@ -82,6 +82,17 @@ Config Config::load(const std::string& path) {
         if (flt["skip_fractional_markets"]) config.filter.skip_fractional_markets = flt["skip_fractional_markets"].as<bool>();
     }
 
+    if (auto n = root["nba"]) {
+        if (n["enabled"])                       config.nba.enabled = n["enabled"].as<bool>();
+        if (n["min_edge_threshold"])            config.nba.min_edge_threshold = n["min_edge_threshold"].as<double>();
+        if (n["max_spread"])                    config.nba.max_spread = n["max_spread"].as<double>();
+        if (n["min_seconds_remaining"])         config.nba.min_seconds_remaining = n["min_seconds_remaining"].as<int>();
+        if (n["max_seconds_remaining"])         config.nba.max_seconds_remaining = n["max_seconds_remaining"].as<int>();
+        if (n["max_position_per_game_dollars"]) config.nba.max_position_per_game_dollars = n["max_position_per_game_dollars"].as<double>();
+        if (n["kelly_fraction"])                config.nba.kelly_fraction = n["kelly_fraction"].as<double>();
+        if (n["scoreboard_poll_seconds"])       config.nba.scoreboard_poll_seconds = n["scoreboard_poll_seconds"].as<int>();
+    }
+
     if (auto a = root["alerts"]) {
         if (a["webhook_url"])           config.alerts.webhook_url = a["webhook_url"].as<std::string>();
         if (a["format"])                config.alerts.format = a["format"].as<std::string>();

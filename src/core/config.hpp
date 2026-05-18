@@ -66,6 +66,25 @@ struct FeedsConfig {
     int refresh_hours = 6;     // how stale before we re-pull the weather ensemble
 };
 
+// NBA in-game trading config. Disabled by default — flip `enabled: true`
+// in config.yaml to spin up the NBA strategy alongside the existing weather
+// strategy. Both share the same exchange / risk_manager / calibration —
+// position quantities and daily PnL aggregate across categories.
+//
+// Default thresholds reflect the v1 arcsine strategy: only trades during
+// the back half of regulation, on near-certain garbage-time or comeback
+// mispricings. Tune via paper trading.
+struct NbaConfig {
+    bool enabled = false;
+    double min_edge_threshold = 0.04;          // 4¢ — sports edges are thinner than weather
+    double max_spread = 0.10;
+    int min_seconds_remaining = 60;            // skip final minute (formula breaks)
+    int max_seconds_remaining = 1440;          // skip first half (talent-gap dominates)
+    double max_position_per_game_dollars = 50.0;
+    double kelly_fraction = 0.25;
+    int scoreboard_poll_seconds = 5;           // cdn.nba.com refresh cadence
+};
+
 // Market-filter thresholds. Mirrors kalshi::FilterConfig but as a plain
 // struct Config can load from YAML without pulling in the strategy header.
 // `main.cpp` translates this to a kalshi::FilterConfig and hands it to
@@ -92,6 +111,7 @@ struct Config {
     AlertsConfig alerts;
     FeedsConfig feeds;
     FilterThresholds filter;
+    NbaConfig nba;
 
     static Config load(const std::string& path);
 };
