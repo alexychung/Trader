@@ -3,7 +3,7 @@
 C++20 trading bot for Kalshi NBA in-game contracts.
 Two cooperating strategies, both designed to survive against the SIG / DRW / Jump quants now active on Kalshi prod.
 
-> **Current status (2026-05-20):** $100 live on Kalshi prod, zero positions, zero losses, multiple post-research improvements just shipped — see [Recent Changes](#recent-changes).
+> **Current status (2026-05-22):** $100 live on Kalshi prod, zero positions, zero losses. First credible backtest evidence of edge — see [Backtest results](#backtest-results) below.
 
 ---
 
@@ -99,7 +99,59 @@ NbaScoreFeed     refresh_markets_by_series  on_market_update
 
 ---
 
+## Backtest results
+
+The backtest harness lives in `src/backtest/` and replays NBA play-by-play (from cdn.nba.com) against the strategies. There are **two price providers** — picking the right one is the whole story:
+
+| Provider | What it does | What it tells you |
+|---|---|---|
+| `SyntheticKalshiPriceProvider` (default) | Prices each side at `our_fair ± half_spread + N(0, noise_stdev)` | Strategy fires gates correctly; **nothing about edge** (synthetic prices are correlated with our model by construction) |
+| `KalshiCandlePriceProvider` (`--real-prices`) | Pulls real historical 1-minute candlesticks from the Kalshi `/candlesticks` endpoint, caches per ticker | Whether the strategy would have triggered against the actual book on the day, and whether those trades would have paid |
+
+Switching to real prices uncovered a silent parse bug: Kalshi's actual response shape uses `*_dollars`/`*_fp` field names (e.g. `close_dollars: "0.3300"`), not `close`/`volume` like the parser assumed. Every candle was being parsed as zero. Fixed in `parse_candlesticks` with a primary-then-legacy field probe; covered by `KalshiRest.ParseCandlesticksRealShape` and `...LegacyShape`.
+
+### Real-prices baseline (2026-04-01 → 2026-04-07, $100 bankroll, $25/game cap)
+
+| Metric | Value |
+|---|---|
+| Games replayed | 51 |
+| Signals fired | 36 (~70% of games) |
+| Win rate | **58.3%** (21W / 15L) |
+| Brier score | **0.1171** (random = 0.25, market baseline ≈ 0.083 on the same sample) |
+| Total PnL | **+$72.02** |
+| Total fees | $3.29 |
+| Max drawdown | $21.39 |
+| Avg PnL per game | $1.41 |
+
+This is the first credible edge signal — synthetic backtests at any setting were uninformative because the prices were derived from our model. Caveats:
+- 1-minute bar resolution; sub-minute moves invisible.
+- We model fills as taker-at-yes_ask (worst-case), so real maker fills might be slightly better OR fail outright. The replay does not simulate queue position.
+- Wall-clock anchoring for play-by-play timestamps is approximate (see `pbp_wall_clock_ts_sec` in `replay_engine.cpp`).
+- One week, 36 signals — directionally encouraging, not a robust statistic.
+
+### Running it yourself
+
+```powershell
+# Synthetic (instant, no API hits)
+.\build\Debug\trader_backtest.exe --start 2026-04-01 --end 2026-04-15 `
+  --csv-out data\backtest\synthetic.csv
+
+# Real Kalshi prices (uses config.kalshi prod auth, caches to data\cache\candles)
+.\build\Debug\trader_backtest.exe --start 2026-04-01 --end 2026-04-07 `
+  --real-prices --bankroll 100 --max-position-dollars 25 `
+  --csv-out data\backtest\real.csv
+```
+
+---
+
 ## Recent Changes
+
+### 2026-05-22: Backtest with real Kalshi prices
+
+- Added `KalshiCandlePriceProvider` + `--real-prices` flag to `trader_backtest`. First time the backtest exercises strategy logic against actual historical prices instead of synthetic.
+- Fixed silent parse bug in `KalshiRestClient::parse_candlesticks` — Kalshi switched response shape to `*_dollars`/`*_fp` and the old parser returned zeros for every field. The bug was hidden because nothing else called `get_candlesticks` until this work.
+- Added `--max-position-dollars` and `--bankroll` sweep knobs.
+- Cleaned the pivot: the 2026-05-20 hardening (Resolution-Lag, CLV/injury feeds, lot-size, etc.) and all the deleted-old-strategy code are now committed (`a6ffa5c`, `b93f454`, `<this commit>`). Working tree is clean.
 
 ### 2026-05-20: Research-driven hardening
 
@@ -256,12 +308,13 @@ The strategy choices in this codebase are driven by [`memory/project_kalshi_mm_r
 
 In priority order:
 
-1. **Wire real `OddsApiPinnacleProvider`** — Single highest-leverage improvement per research. The Null stub keeps the CLV gate code path exercised in tests, but adds zero edge until a real provider is in place.
-2. **Wire real `EspnInjuryFeed`** — Defends against the dominant adverse-selection loss mode (Polymarket operator's "turn off MM" button).
-3. **Apply for Kalshi VIP** — Volume + Liquidity Incentive Programs. Free $0.005/contract rebate on eligible volume.
-4. **Move to Chicago VPS** — $5–20/mo, 100× latency reduction.
-5. **Use `amend_order` in OrderManager** — Stub-level: the endpoint is exposed but OrderManager doesn't yet call it. Wire on price-down re-quotes for queue preservation.
-6. **Real `OddsApiPinnacleProvider` for player-prop arb** — second-order edge once base CLV gate is shipped.
+1. **Run the real-prices backtest over a full season window**, not just one week. The 36-signal sample is encouraging but small; firmer numbers (and ideally a per-month walk-forward) would tell us whether the 58% win rate holds.
+2. **Replay-engine fill realism**: today every signal fills at `signal.market_price` (worst-case ask). Adding a simple maker-fill model (post at bid+1¢; check whether the bar's high touched it) would let us tell maker- and taker-mode P&L apart.
+3. **Wire real `OddsApiPinnacleProvider`** — Single highest-leverage improvement per research. The Null stub keeps the CLV gate code path exercised in tests, but adds zero edge until a real provider is in place.
+4. **Wire real `EspnInjuryFeed`** — Defends against the dominant adverse-selection loss mode (Polymarket operator's "turn off MM" button).
+5. **Apply for Kalshi VIP** — Volume + Liquidity Incentive Programs. Free $0.005/contract rebate on eligible volume.
+6. **Move to Chicago VPS** — $5–20/mo, 100× latency reduction.
+7. **Use `amend_order` in OrderManager** — Stub-level: the endpoint is exposed but OrderManager doesn't yet call it. Wire on price-down re-quotes for queue preservation.
 
 ---
 
