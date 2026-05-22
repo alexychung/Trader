@@ -47,6 +47,7 @@ add_library(trader_core STATIC
     src/backtest/settled_markets_fetcher.cpp
     src/backtest/nba_pbp_fetcher.cpp
     src/backtest/replay_engine.cpp
+    src/backtest/kalshi_candle_provider.cpp
 )
 target_include_directories(trader_core PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(trader_core PUBLIC

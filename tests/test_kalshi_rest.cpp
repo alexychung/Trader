@@ -102,6 +102,60 @@ TEST(KalshiRest, OrderbookBestBidEmpty) {
     EXPECT_DOUBLE_EQ(book.best_yes_bid(), 0.0);
 }
 
+// Real Kalshi candlestick response shape (as of 2026-05). Fields are
+// `*_dollars` strings (not numeric `close`/`open`/etc.) and counters
+// have a `_fp` suffix. Earlier shape with numeric `close`/`volume` is
+// kept as a legacy fallback in the parser.
+TEST(KalshiRest, ParseCandlesticksRealShape) {
+    nlohmann::json body = {
+        {"candlesticks", nlohmann::json::array({
+            {
+                {"end_period_ts", 1779228000},
+                {"open_interest_fp", "2951639.12"},
+                {"price", {
+                    {"open_dollars", "0.3200"},
+                    {"high_dollars", "0.3300"},
+                    {"low_dollars", "0.3100"},
+                    {"close_dollars", "0.3300"},
+                }},
+                {"volume_fp", "5731.82"},
+                {"yes_ask", {{"close_dollars", "0.3300"}}},
+                {"yes_bid", {{"close_dollars", "0.3200"}}},
+            }
+        })}
+    };
+    auto candles = KalshiRestClient::parse_candlesticks(body);
+    ASSERT_EQ(candles.size(), 1u);
+    EXPECT_EQ(candles[0].end_period_ts, 1779228000);
+    EXPECT_EQ(candles[0].open_interest, 2951639);
+    EXPECT_EQ(candles[0].volume, 5731);
+    EXPECT_DOUBLE_EQ(candles[0].price_open, 0.32);
+    EXPECT_DOUBLE_EQ(candles[0].price_close, 0.33);
+    EXPECT_DOUBLE_EQ(candles[0].yes_bid_close, 0.32);
+    EXPECT_DOUBLE_EQ(candles[0].yes_ask_close, 0.33);
+}
+
+TEST(KalshiRest, ParseCandlesticksLegacyShape) {
+    // Legacy shape — numeric values, no `_dollars` / `_fp` suffix.
+    nlohmann::json body = {
+        {"candlesticks", nlohmann::json::array({
+            {
+                {"end_period_ts", 1779228000},
+                {"open_interest", 100},
+                {"price", {{"close", 0.55}}},
+                {"volume", 7},
+                {"yes_bid", {{"close", 0.54}}},
+                {"yes_ask", {{"close", 0.56}}},
+            }
+        })}
+    };
+    auto candles = KalshiRestClient::parse_candlesticks(body);
+    ASSERT_EQ(candles.size(), 1u);
+    EXPECT_EQ(candles[0].volume, 7);
+    EXPECT_DOUBLE_EQ(candles[0].yes_bid_close, 0.54);
+    EXPECT_DOUBLE_EQ(candles[0].yes_ask_close, 0.56);
+}
+
 TEST(KalshiRest, ParseMultipleMarkets) {
     nlohmann::json markets_array = nlohmann::json::array({
         {{"ticker", "MKT1"}, {"status", "open"}, {"volume", 100}},

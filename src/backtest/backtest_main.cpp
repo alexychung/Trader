@@ -12,10 +12,13 @@
 // and prints aggregate metrics. Per-game results are written to a CSV the
 // user can pivot in a spreadsheet.
 
+#include "backtest/kalshi_candle_provider.hpp"
 #include "backtest/nba_pbp_fetcher.hpp"
 #include "backtest/replay_engine.hpp"
 #include "core/config.hpp"
 #include "core/logging.hpp"
+#include "exchange/kalshi/auth.hpp"
+#include "exchange/kalshi/rest_client.hpp"
 
 #include <spdlog/spdlog.h>
 
@@ -49,6 +52,14 @@ struct CliArgs {
     // -1 = use whatever's in config (or built-in default).
     double max_position_dollars = -1.0;
     double simulated_bankroll = -1.0;
+    // Use real historical Kalshi candlesticks instead of the synthetic
+    // provider. Requires network on first run; subsequent runs hit the
+    // candle_cache_dir cache. Credentials are read from the same config
+    // file as the live bot (config.kalshi.api_key_file / api_key_id) —
+    // Kalshi's candlestick endpoint requires authentication, even for
+    // public market data.
+    bool real_prices = false;
+    std::string candle_cache_dir = "data/cache/candles";
     bool help = false;
 };
 
@@ -61,7 +72,9 @@ void print_usage() {
         "                       [--config config/config.yaml]\n"
         "                       [--noise-stdev 0.04]\n"
         "                       [--max-position-dollars N]   # override per-game sizing cap\n"
-        "                       [--bankroll N]               # override simulated bankroll\n";
+        "                       [--bankroll N]               # override simulated bankroll\n"
+        "                       [--real-prices]              # use real Kalshi candlesticks (auth via config.kalshi)\n"
+        "                       [--candle-cache-dir data/cache/candles]\n";
 }
 
 bool parse_args(int argc, char* argv[], CliArgs& out) {
@@ -93,6 +106,8 @@ bool parse_args(int argc, char* argv[], CliArgs& out) {
             try { out.simulated_bankroll = std::stod(next("--bankroll")); }
             catch (...) { std::cerr << "bad --bankroll\n"; return false; }
         }
+        else if (a == "--real-prices") out.real_prices = true;
+        else if (a == "--candle-cache-dir") out.candle_cache_dir = next("--candle-cache-dir");
         else {
             std::cerr << "Unknown arg: " << a << "\n";
             return false;
@@ -237,8 +252,35 @@ int main(int argc, char* argv[]) {
 
     trader::backtest::BacktestReplay engine(rcfg);
 
+    // Optional real-prices path. The REST client + candle provider are
+    // built only if the user asked for them — keeps the default synthetic
+    // path free of network deps.
+    std::unique_ptr<trader::kalshi::KalshiAuth> auth;
+    std::unique_ptr<trader::kalshi::KalshiRestClient> rest;
+    std::unique_ptr<trader::backtest::KalshiCandlePriceProvider> candle_provider;
+    if (args.real_prices) {
+        auth = std::make_unique<trader::kalshi::KalshiAuth>();
+        if (!cfg.kalshi.api_key_file.empty()) {
+            if (!auth->load_key(cfg.kalshi.api_key_file)) {
+                spdlog::error("Could not load Kalshi key from {} — candle "
+                              "fetch will 404. Aborting.",
+                              cfg.kalshi.api_key_file);
+                return 2;
+            }
+        }
+        auth->set_api_key_id(cfg.kalshi.api_key_id);
+        rest = std::make_unique<trader::kalshi::KalshiRestClient>(
+            cfg.kalshi.api_base, *auth);
+        candle_provider = std::make_unique<
+            trader::backtest::KalshiCandlePriceProvider>(*rest,
+                                                          args.candle_cache_dir);
+        spdlog::info("Real-price mode: candles via {} (cache: {})",
+                     cfg.kalshi.api_base, args.candle_cache_dir);
+    }
+
     std::vector<trader::backtest::GameReplayResult> per_game;
     int games_attempted = 0;
+    int games_skipped_no_kalshi_data = 0;
 
     for (const auto& date : iterate_dates(args.start_date, args.end_date)) {
         auto games = pbp.fetch_games_on_date(date);
@@ -254,12 +296,33 @@ int main(int argc, char* argv[]) {
                              g.game_id, g.away_tricode, g.home_tricode);
                 continue;
             }
-            trader::backtest::SyntheticKalshiPriceProvider provider(
-                g.home_tricode, g.away_tricode,
-                /*half_spread=*/0.02, /*noise_stdev=*/args.noise_stdev);
-            auto result = engine.replay_game(g, events, provider);
-            per_game.push_back(result);
+            if (args.real_prices) {
+                bool ok = candle_provider->prefetch_game(
+                    g.game_date_iso, g.home_tricode, g.away_tricode);
+                if (!ok) {
+                    ++games_skipped_no_kalshi_data;
+                    spdlog::info("No Kalshi candles for {} {}@{} — skipping",
+                                 g.game_id, g.away_tricode, g.home_tricode);
+                    continue;
+                }
+                auto result = engine.replay_game(g, events, *candle_provider);
+                per_game.push_back(result);
+            } else {
+                trader::backtest::SyntheticKalshiPriceProvider provider(
+                    g.home_tricode, g.away_tricode,
+                    /*half_spread=*/0.02, /*noise_stdev=*/args.noise_stdev);
+                auto result = engine.replay_game(g, events, provider);
+                per_game.push_back(result);
+            }
         }
+    }
+    if (args.real_prices) {
+        spdlog::info("Candle cache: {} hits, {} misses, {} empty fetches; "
+                     "{} games skipped (no Kalshi data)",
+                     candle_provider->cache_hits(),
+                     candle_provider->cache_misses(),
+                     candle_provider->empty_fetches(),
+                     games_skipped_no_kalshi_data);
     }
 
     auto summary = trader::backtest::aggregate(per_game);
@@ -300,12 +363,21 @@ int main(int argc, char* argv[]) {
         std::cout << "N/A";
     }
     std::cout << "\n========================\n\n";
-    std::cout << "NOTE: This V1 backtest uses a SYNTHETIC Kalshi price model\n"
-                 "(our_fair ± half_spread + small noise). It exercises strategy\n"
-                 "logic and signal rate but is OPTIMISTIC about edge — real\n"
-                 "Kalshi prices will differ from our fair, and that gap is what\n"
-                 "the strategy is supposed to exploit. For an honest edge test,\n"
-                 "swap in a candlestick-backed IKalshiPriceProvider.\n\n";
+    if (args.real_prices) {
+        std::cout << "NOTE: Real Kalshi candlestick prices (1-minute bars). The\n"
+                     "strategy saw `yes_bid_close` / `yes_ask_close` for each\n"
+                     "bar — sub-minute moves are invisible. Wall-clock anchoring\n"
+                     "for pbp events is approximate (see pbp_wall_clock_ts_sec)\n"
+                     "so the candle bar may be off by a minute or two vs. real\n"
+                     "live execution. Games with no Kalshi data are skipped.\n\n";
+    } else {
+        std::cout << "NOTE: This run used a SYNTHETIC Kalshi price model\n"
+                     "(our_fair ± half_spread + small noise). It exercises\n"
+                     "strategy logic and signal rate but is OPTIMISTIC about\n"
+                     "edge — synthetic prices are correlated with our model\n"
+                     "by construction. Re-run with --real-prices for an\n"
+                     "honest edge test against historical Kalshi books.\n\n";
+    }
 
     if (!args.csv_out.empty()) {
         write_csv(args.csv_out, summary);

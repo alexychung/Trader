@@ -315,6 +315,8 @@ KalshiRestClient::get_candlesticks(const std::string& series_ticker,
                      ticker, resp.status_code, resp.body.substr(0, 200));
         return {};
     }
+    spdlog::debug("get_candlesticks {} resp body[0:1200]={}", ticker,
+                  resp.body.substr(0, 1200));
     try {
         auto j = nlohmann::json::parse(resp.body);
         return parse_candlesticks(j);
@@ -340,14 +342,28 @@ KalshiRestClient::parse_candlesticks(const nlohmann::json& body) {
         if (v.is_number()) return v.get<double>();
         return 0.0;
     };
-    auto read_int = [](const nlohmann::json& obj, const char* key) -> int {
-        if (!obj.contains(key) || obj[key].is_null()) return 0;
-        const auto& v = obj[key];
-        if (v.is_number_integer()) return v.get<int>();
-        if (v.is_number()) return static_cast<int>(v.get<double>());
-        if (v.is_string()) {
-            try { return std::stoi(v.get<std::string>()); }
-            catch (...) { return 0; }
+    // Try a primary key first, fall back to legacy. Kalshi switched the
+    // OHLC field names from `close`/`open`/etc. to `close_dollars`/etc.
+    // and renamed `volume` → `volume_fp` (and `open_interest` →
+    // `open_interest_fp`) at some point in 2025/2026; the legacy shape is
+    // kept as a fallback so old fixtures keep parsing.
+    auto read_price_pref = [&](const nlohmann::json& obj, const char* primary,
+                                const char* legacy) -> double {
+        double v = read_price(obj, primary);
+        if (v != 0.0) return v;
+        return read_price(obj, legacy);
+    };
+    auto read_int_loose = [](const nlohmann::json& obj,
+                              std::initializer_list<const char*> keys) -> int {
+        for (const char* key : keys) {
+            if (!obj.contains(key) || obj[key].is_null()) continue;
+            const auto& v = obj[key];
+            if (v.is_number_integer()) return v.get<int>();
+            if (v.is_number()) return static_cast<int>(v.get<double>());
+            if (v.is_string()) {
+                try { return static_cast<int>(std::stod(v.get<std::string>())); }
+                catch (...) { continue; }
+            }
         }
         return 0;
     };
@@ -360,20 +376,20 @@ KalshiRestClient::parse_candlesticks(const nlohmann::json& body) {
                 k.end_period_ts = static_cast<int64_t>(c["end_period_ts"].get<double>());
             }
         }
-        k.open_interest = read_int(c, "open_interest");
-        k.volume = read_int(c, "volume");
+        k.open_interest = read_int_loose(c, {"open_interest_fp", "open_interest"});
+        k.volume = read_int_loose(c, {"volume_fp", "volume"});
         if (c.contains("price") && c["price"].is_object()) {
             const auto& p = c["price"];
-            k.price_open  = read_price(p, "open");
-            k.price_high  = read_price(p, "high");
-            k.price_low   = read_price(p, "low");
-            k.price_close = read_price(p, "close");
+            k.price_open  = read_price_pref(p, "open_dollars",  "open");
+            k.price_high  = read_price_pref(p, "high_dollars",  "high");
+            k.price_low   = read_price_pref(p, "low_dollars",   "low");
+            k.price_close = read_price_pref(p, "close_dollars", "close");
         }
         if (c.contains("yes_bid") && c["yes_bid"].is_object()) {
-            k.yes_bid_close = read_price(c["yes_bid"], "close");
+            k.yes_bid_close = read_price_pref(c["yes_bid"], "close_dollars", "close");
         }
         if (c.contains("yes_ask") && c["yes_ask"].is_object()) {
-            k.yes_ask_close = read_price(c["yes_ask"], "close");
+            k.yes_ask_close = read_price_pref(c["yes_ask"], "close_dollars", "close");
         }
         out.push_back(k);
     }
