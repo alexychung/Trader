@@ -1,200 +1,316 @@
-#include "backtest/driver.hpp"
-#include "backtest/report.hpp"
-#include "backtest/settled_markets_fetcher.hpp"
+// Backtest CLI.
+//
+// Usage:
+//   trader_backtest --start YYYY-MM-DD --end YYYY-MM-DD
+//                   [--strategy nba|reslag|both]
+//                   [--cache-dir data/cache/pbp]
+//                   [--csv-out data/backtest/results.csv]
+//                   [--config config/config.yaml]
+//
+// Fetches NBA scoreboards + play-by-play in [start, end], runs the
+// configured strategy against each game with a SyntheticKalshiPriceProvider,
+// and prints aggregate metrics. Per-game results are written to a CSV the
+// user can pivot in a spreadsheet.
+
+#include "backtest/nba_pbp_fetcher.hpp"
+#include "backtest/replay_engine.hpp"
 #include "core/config.hpp"
 #include "core/logging.hpp"
-#include "core/staleness_gate.hpp"
-#include "exchange/kalshi/auth.hpp"
-#include "exchange/kalshi/rest_client.hpp"
-#include "exchange/mock_exchange.hpp"
-#include "risk/cluster_limiter.hpp"
-#include "risk/risk_manager.hpp"
-#include "strategy/kalshi/adaptive_sizer.hpp"
-#include "strategy/kalshi/calibration.hpp"
-#include "strategy/kalshi/econ_models.hpp"
-#include "strategy/kalshi/edge_detector.hpp"
-#include "strategy/kalshi/event_strategy.hpp"
-#include "strategy/kalshi/market_filter.hpp"
-#include "strategy/kalshi/probability_calibrator.hpp"
-#include "strategy/kalshi/probability_engine.hpp"
 
 #include <spdlog/spdlog.h>
-#include <filesystem>
-#include <iostream>
-#include <string>
 
-using namespace trader;
-using namespace trader::kalshi;
+#include <chrono>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 namespace {
 
 struct CliArgs {
     std::string start_date;
     std::string end_date;
-    std::string category = "weather";
+    std::string strategy = "both";   // nba | reslag | both
+    std::string cache_dir = "data/cache/pbp";
+    std::string csv_out;             // empty = skip CSV
     std::string config_path = "config/config.yaml";
-    std::string run_id;
-    int max_markets = 200;
-    std::string api_base = "https://api.elections.kalshi.com/trade-api/v2";
-    std::string cache_dir = "data/cache/backtest";
-    std::string out_dir = "data/backtest";
+    // Synthetic-Kalshi noise standard deviation (in price units). Larger
+    // values produce more Kalshi mispricing and therefore more strategy
+    // signals — useful to verify the strategy fires correctly even on a
+    // toy data source. 0.01 is the calibrated-Kalshi case (almost no
+    // signals); 0.04-0.06 is closer to "Kalshi is reacting slowly /
+    // anchored" and exercises the strategy.
+    double noise_stdev = 0.04;
+    // Overrides for sizing knobs that materially change the backtest result.
+    // -1 = use whatever's in config (or built-in default).
+    double max_position_dollars = -1.0;
+    double simulated_bankroll = -1.0;
+    bool help = false;
 };
 
 void print_usage() {
     std::cerr <<
-        "trader_backtest --start YYYY-MM-DD --end YYYY-MM-DD [options]\n"
-        "  --category <cat>       default: weather\n"
-        "  --config <path>        default: config/config.yaml\n"
-        "  --run-id <id>          default: timestamp\n"
-        "  --max-markets <n>      default: 200\n"
-        "  --api-base <url>       default: https://api.elections.kalshi.com/trade-api/v2\n"
-        "  --cache-dir <path>     default: data/cache/backtest\n"
-        "  --out-dir <path>       default: data/backtest\n";
+        "Usage: trader_backtest --start YYYY-MM-DD --end YYYY-MM-DD\n"
+        "                       [--strategy nba|reslag|both]\n"
+        "                       [--cache-dir data/cache/pbp]\n"
+        "                       [--csv-out data/backtest/results.csv]\n"
+        "                       [--config config/config.yaml]\n"
+        "                       [--noise-stdev 0.04]\n"
+        "                       [--max-position-dollars N]   # override per-game sizing cap\n"
+        "                       [--bankroll N]               # override simulated bankroll\n";
 }
 
-bool parse_args(int argc, char** argv, CliArgs& out) {
+bool parse_args(int argc, char* argv[], CliArgs& out) {
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        auto next = [&](const char* flag) -> std::string {
+        auto next = [&](const char* name) -> std::string {
             if (i + 1 >= argc) {
-                std::cerr << flag << " requires a value\n";
-                return "";
+                std::cerr << name << " requires a value\n";
+                return {};
             }
             return argv[++i];
         };
-        if (a == "--start") out.start_date = next("--start");
+        if (a == "--help" || a == "-h") { out.help = true; }
+        else if (a == "--start") out.start_date = next("--start");
         else if (a == "--end") out.end_date = next("--end");
-        else if (a == "--category") out.category = next("--category");
-        else if (a == "--config") out.config_path = next("--config");
-        else if (a == "--run-id") out.run_id = next("--run-id");
-        else if (a == "--max-markets") out.max_markets = std::stoi(next("--max-markets"));
-        else if (a == "--api-base") out.api_base = next("--api-base");
+        else if (a == "--strategy") out.strategy = next("--strategy");
         else if (a == "--cache-dir") out.cache_dir = next("--cache-dir");
-        else if (a == "--out-dir") out.out_dir = next("--out-dir");
-        else if (a == "-h" || a == "--help") { print_usage(); return false; }
-        else { std::cerr << "unknown flag: " << a << "\n"; print_usage(); return false; }
+        else if (a == "--csv-out") out.csv_out = next("--csv-out");
+        else if (a == "--config") out.config_path = next("--config");
+        else if (a == "--noise-stdev") {
+            try { out.noise_stdev = std::stod(next("--noise-stdev")); }
+            catch (...) { std::cerr << "bad --noise-stdev\n"; return false; }
+        }
+        else if (a == "--max-position-dollars") {
+            try { out.max_position_dollars = std::stod(next("--max-position-dollars")); }
+            catch (...) { std::cerr << "bad --max-position-dollars\n"; return false; }
+        }
+        else if (a == "--bankroll") {
+            try { out.simulated_bankroll = std::stod(next("--bankroll")); }
+            catch (...) { std::cerr << "bad --bankroll\n"; return false; }
+        }
+        else {
+            std::cerr << "Unknown arg: " << a << "\n";
+            return false;
+        }
     }
+    if (out.help) return true;
     if (out.start_date.empty() || out.end_date.empty()) {
-        std::cerr << "--start and --end are required\n";
-        print_usage();
+        std::cerr << "ERROR: --start and --end are required.\n";
+        return false;
+    }
+    if (out.strategy != "nba" && out.strategy != "reslag" &&
+        out.strategy != "both") {
+        std::cerr << "ERROR: --strategy must be one of nba, reslag, both\n";
         return false;
     }
     return true;
 }
 
+// Inclusive date iteration. Both args YYYY-MM-DD.
+std::vector<std::string> iterate_dates(const std::string& start,
+                                        const std::string& end) {
+    std::vector<std::string> out;
+    auto parse = [](const std::string& s) -> std::tm {
+        std::tm tm{};
+        tm.tm_year = std::stoi(s.substr(0, 4)) - 1900;
+        tm.tm_mon = std::stoi(s.substr(5, 2)) - 1;
+        tm.tm_mday = std::stoi(s.substr(8, 2));
+        return tm;
+    };
+    std::tm s = parse(start);
+    std::tm e = parse(end);
+#ifdef _WIN32
+    std::time_t st = _mkgmtime(&s);
+    std::time_t et = _mkgmtime(&e);
+#else
+    std::time_t st = timegm(&s);
+    std::time_t et = timegm(&e);
+#endif
+    for (std::time_t t = st; t <= et; t += 86400) {
+        std::tm gm{};
+#ifdef _WIN32
+        gmtime_s(&gm, &t);
+#else
+        gmtime_r(&t, &gm);
+#endif
+        char buf[16];
+        std::strftime(buf, sizeof(buf), "%Y-%m-%d", &gm);
+        out.push_back(buf);
+    }
+    return out;
+}
+
+void write_csv(const std::string& path,
+                const trader::backtest::BacktestSummary& summary) {
+    std::filesystem::create_directories(
+        std::filesystem::path(path).parent_path());
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) {
+        spdlog::error("Could not open CSV for writing: {}", path);
+        return;
+    }
+    f << "game_id,date,away,home,away_final,home_final,home_won,"
+         "signals_arcsine,signals_reslag,fills,total_fees,settled_pnl\n";
+    for (const auto& g : summary.per_game) {
+        f << g.game_id << "," << g.date_iso << ","
+          << g.away_tricode << "," << g.home_tricode << ","
+          << g.away_final_score << "," << g.home_final_score << ","
+          << (g.home_won ? 1 : 0) << ","
+          << g.signals_arcsine << "," << g.signals_resolution_lag << ","
+          << g.fills.size() << ","
+          << std::fixed << std::setprecision(4) << g.total_fees << ","
+          << std::fixed << std::setprecision(4) << g.settled_pnl << "\n";
+    }
+}
+
 } // namespace
 
-int main(int argc, char** argv) {
+int main(int argc, char* argv[]) {
     CliArgs args;
-    if (!parse_args(argc, argv, args)) return 1;
+    if (!parse_args(argc, argv, args) || args.help) {
+        print_usage();
+        return args.help ? 0 : 1;
+    }
 
-    // Config is optional — if present, use the logging section. Everything else
-    // for backtest is CLI-driven.
-    Config cfg;
-    try {
-        if (std::filesystem::exists(args.config_path)) {
-            cfg = Config::load(args.config_path);
+    // Use the same logging init as the live bot so log levels follow config.
+    // Config is optional — we fall back to defaults if it's missing.
+    trader::Config cfg;
+    try { cfg = trader::Config::load(args.config_path); }
+    catch (...) {
+        spdlog::warn("Could not load config {}, using defaults",
+                     args.config_path);
+    }
+    trader::init_logging(cfg.logging.level, /*file=*/"", /*console=*/true);
+
+    spdlog::info("Backtest range: {} → {}, strategy={}",
+                 args.start_date, args.end_date, args.strategy);
+
+    trader::backtest::NbaPbpFetcher pbp(args.cache_dir);
+
+    // Build the strategy config from the live config's NBA + reslag blocks.
+    trader::backtest::ReplayConfig rcfg;
+    rcfg.nba.min_edge_threshold            = cfg.nba.min_edge_threshold;
+    rcfg.nba.max_spread                    = cfg.nba.max_spread;
+    rcfg.nba.min_seconds_remaining         = cfg.nba.min_seconds_remaining;
+    rcfg.nba.max_seconds_remaining         = cfg.nba.max_seconds_remaining;
+    rcfg.nba.max_position_per_game_dollars = cfg.nba.max_position_per_game_dollars;
+    rcfg.nba.kelly_fraction                = cfg.nba.kelly_fraction;
+    rcfg.nba.min_abs_score_diff            = cfg.nba.min_abs_score_diff;
+    rcfg.nba.max_uncertain_wp              = cfg.nba.max_uncertain_wp;
+    rcfg.nba.min_strong_wp                 = cfg.nba.min_strong_wp;
+    rcfg.nba.min_lot_size                  = cfg.nba.min_lot_size;
+    rcfg.nba.min_clv_edge                  = cfg.nba.min_clv_edge;
+    rcfg.nba.min_market_volume             = cfg.nba.min_market_volume;
+    rcfg.nba.default_pregame_spread        = cfg.nba.default_pregame_spread;
+    rcfg.reslag.cutoff_clock_seconds       = cfg.resolution_lag.cutoff_clock_seconds;
+    rcfg.reslag.cutoff_lead_points         = cfg.resolution_lag.cutoff_lead_points;
+    rcfg.reslag.include_status_final       = cfg.resolution_lag.include_status_final;
+    rcfg.reslag.min_entry_price            = cfg.resolution_lag.min_entry_price;
+    rcfg.reslag.max_entry_price            = cfg.resolution_lag.max_entry_price;
+    rcfg.reslag.max_position_per_game_dollars =
+        cfg.resolution_lag.max_position_per_game_dollars;
+    rcfg.reslag.min_lot_size               = cfg.resolution_lag.min_lot_size;
+    rcfg.reslag.min_market_volume          = cfg.resolution_lag.min_market_volume;
+    rcfg.run_resolution_lag = (args.strategy == "reslag" || args.strategy == "both");
+    // For --strategy nba, we also need to *disable* arcsine signals from the
+    // NBA strategy. Easiest: set an absurd min_edge_threshold so nothing fires.
+    if (args.strategy == "reslag") {
+        rcfg.nba.min_edge_threshold = 1.0;  // unreachable
+    }
+
+    if (args.max_position_dollars > 0.0) {
+        rcfg.nba.max_position_per_game_dollars = args.max_position_dollars;
+        rcfg.reslag.max_position_per_game_dollars = args.max_position_dollars;
+        spdlog::info("Override: max_position_per_game_dollars = ${:.2f}",
+                     args.max_position_dollars);
+    }
+    if (args.simulated_bankroll > 0.0) {
+        rcfg.simulated_bankroll = args.simulated_bankroll;
+        spdlog::info("Override: simulated_bankroll = ${:.2f}",
+                     args.simulated_bankroll);
+    }
+
+    trader::backtest::BacktestReplay engine(rcfg);
+
+    std::vector<trader::backtest::GameReplayResult> per_game;
+    int games_attempted = 0;
+
+    for (const auto& date : iterate_dates(args.start_date, args.end_date)) {
+        auto games = pbp.fetch_games_on_date(date);
+        spdlog::info("Date {}: {} games", date, games.size());
+        for (const auto& g : games) {
+            // Only replay games that finished — pre/in-progress have
+            // no settle outcome we can score.
+            if (g.game_status != 3) continue;
+            ++games_attempted;
+            auto events = pbp.fetch_pbp(g.game_id);
+            if (events.empty()) {
+                spdlog::warn("No PBP for {} {}@{} — skipping",
+                             g.game_id, g.away_tricode, g.home_tricode);
+                continue;
+            }
+            trader::backtest::SyntheticKalshiPriceProvider provider(
+                g.home_tricode, g.away_tricode,
+                /*half_spread=*/0.02, /*noise_stdev=*/args.noise_stdev);
+            auto result = engine.replay_game(g, events, provider);
+            per_game.push_back(result);
         }
-    } catch (const std::exception& e) {
-        std::cerr << "failed to load config (" << e.what() << "), using defaults\n";
     }
-    init_logging(cfg.logging.level.empty() ? "info" : cfg.logging.level,
-                 "logs/backtest.log", true);
 
-    spdlog::info("=== Kalshi Backtest Harness ===");
-    spdlog::info("Window: {} .. {}  category='{}'  max_markets={}",
-                 args.start_date, args.end_date, args.category, args.max_markets);
+    auto summary = trader::backtest::aggregate(per_game);
+    spdlog::info("PBP cache: {} hits, {} misses",
+                 pbp.cache_hits(), pbp.cache_misses());
 
-    // --- Exchange for historical market fetches (unauthenticated is fine) ---
-    KalshiAuth auth;
-    KalshiRestClient rest(args.api_base, auth);
-
-    backtest::SettledMarketsFetcher fetcher(rest, args.cache_dir + "/markets");
-    auto markets = fetcher.fetch_all(args.start_date, args.end_date,
-                                       args.category, args.max_markets);
-    if (markets.empty()) {
-        spdlog::error("No settled markets found in window. Check --start/--end and --api-base.");
-        return 2;
+    std::cout << "\n=== Backtest Summary ===\n"
+              << "Range:            " << args.start_date << " → "
+                                       << args.end_date << "\n"
+              << "Strategy:         " << args.strategy << "\n"
+              << "Games attempted:  " << games_attempted << "\n"
+              << "Games replayed:   " << summary.games_replayed << "\n"
+              << "Total signals:    " << summary.total_signals << "\n"
+              << "Total fills:      " << summary.total_fills << "\n"
+              << "Wins:             " << summary.wins << "\n"
+              << "Losses:           " << summary.losses;
+    if (summary.wins + summary.losses > 0) {
+        double wr = static_cast<double>(summary.wins) /
+                    static_cast<double>(summary.wins + summary.losses);
+        std::cout << "  (" << std::fixed << std::setprecision(1)
+                  << wr * 100.0 << "% win rate)";
     }
-    spdlog::info("Loaded {} settled markets (cache hits: {}, misses: {})",
-                 markets.size(), fetcher.cache_hits(), fetcher.cache_misses());
-
-    // --- Build strategy with isolated calibration file ---
-    std::string run_id = args.run_id;
-    if (run_id.empty()) {
-        run_id = "run-" + args.start_date + "-" + args.end_date + "-" + args.category;
+    std::cout << "\n"
+              << "Total PnL:        $" << std::fixed << std::setprecision(2)
+              << summary.total_pnl << "\n"
+              << "Total fees:       $" << std::fixed << std::setprecision(2)
+              << summary.total_fees << "\n"
+              << "Max drawdown:     $" << std::fixed << std::setprecision(2)
+              << summary.max_drawdown << "\n"
+              << "Brier score:      " << std::fixed << std::setprecision(4)
+              << summary.brier_score << "  ("
+              << summary.brier_samples << " samples)\n"
+              << "Avg PnL per game: $";
+    if (summary.games_replayed > 0) {
+        std::cout << std::fixed << std::setprecision(2)
+                  << summary.total_pnl / summary.games_replayed;
+    } else {
+        std::cout << "N/A";
     }
-    auto run_dir = std::filesystem::path(args.out_dir) / run_id;
-    std::error_code ec;
-    std::filesystem::create_directories(run_dir, ec);
+    std::cout << "\n========================\n\n";
+    std::cout << "NOTE: This V1 backtest uses a SYNTHETIC Kalshi price model\n"
+                 "(our_fair ± half_spread + small noise). It exercises strategy\n"
+                 "logic and signal rate but is OPTIMISTIC about edge — real\n"
+                 "Kalshi prices will differ from our fair, and that gap is what\n"
+                 "the strategy is supposed to exploit. For an honest edge test,\n"
+                 "swap in a candlestick-backed IKalshiPriceProvider.\n\n";
 
-    MockExchange exchange(100.0);
-    exchange.connect();
+    if (!args.csv_out.empty()) {
+        write_csv(args.csv_out, summary);
+        std::cout << "Per-game results written to " << args.csv_out << "\n";
+    }
 
-    ProbabilityEngine prob_engine;
-    auto weather_model = std::make_shared<WeatherEnsembleModel>();
-    auto cpi_model = std::make_shared<CpiModel>();
-    auto fed_model = std::make_shared<FedRateModel>();
-    prob_engine.register_model("weather", weather_model);
-    prob_engine.register_model("economics", cpi_model);
-    prob_engine.register_model("fed", fed_model);
-
-    RiskConfig risk_cfg;
-    RiskManager risk_manager(risk_cfg);
-    risk_manager.set_balance(100.0);
-
-    EdgeDetector::Config edge_cfg;
-    edge_cfg.min_edge = 0.05;
-    edge_cfg.kelly_fraction = 0.25;
-    edge_cfg.bankroll = 100.0;
-    EdgeDetector edge_detector(edge_cfg);
-
-    MarketFilter market_filter;
-
-    // Isolated calibration file per run so the live bot's calibration stays clean.
-    std::string calib_path = (run_dir / "calibration.json").string();
-    CalibrationLogger calibration(calib_path);
-
-    AdaptiveSizer sizer;
-    ProbabilityCalibrator prob_calibrator;
-    StalenessGate staleness;
-    ClusterLimiter cluster_limiter;
-
-    KalshiEventStrategy strategy(prob_engine, edge_detector, market_filter,
-                                  risk_manager, calibration, sizer,
-                                  prob_calibrator, staleness, cluster_limiter);
-
-    backtest::BacktestDriver::Config driver_cfg;
-    driver_cfg.weather_cache_dir = args.cache_dir + "/weather";
-    backtest::BacktestDriver driver(strategy, prob_engine, weather_model,
-                                     staleness, exchange, driver_cfg);
-
-    auto run_result = driver.run(std::move(markets));
-    spdlog::info("Driver: decisions={}, settlements={}, orders={}",
-                 run_result.decisions_made, run_result.settlements_applied,
-                 run_result.orders_placed);
-
-    backtest::BacktestReport::Config rep_cfg;
-    rep_cfg.run_id = run_id;
-    rep_cfg.out_dir_base = args.out_dir;
-    rep_cfg.adverse_fill_slippage = driver_cfg.adverse_fill_slippage;
-    rep_cfg.assume_taker_fills = driver_cfg.assume_taker_fills;
-    backtest::BacktestReport report(calibration, exchange, run_result, rep_cfg);
-    auto out_dir = report.write();
-
-    auto summary = report.compute_summary();
-    spdlog::info("---");
-    spdlog::info("Samples: {} (real={}, shadow={}, resolved={})",
-                 summary.samples, summary.real_trades, summary.shadow_trades, summary.resolved);
-    spdlog::info("Brier model (all):       {:.4f}", summary.brier_all);
-    spdlog::info("Brier model (real only): {:.4f}", summary.brier_real);
-    spdlog::info("Brier market baseline:   {:.4f}", summary.brier_market_baseline);
-    spdlog::info("Model edge vs market:    {:+.4f}", summary.brier_market_baseline - summary.brier_all);
-    spdlog::info("Hit rate (strong, p>=0.55): {:.1f}%", summary.hit_rate * 100);
-    spdlog::info("Hypothetical PnL: ${:.2f} (fee drag ${:.2f}, slippage ${:.2f})",
-                 summary.hypothetical_pnl, summary.fee_drag, summary.slippage_drag);
-    spdlog::info("Report written to: {}", out_dir);
-
-    // Exit code semantics for scripts: 0 = normal completion; 3 = no resolved samples.
-    return summary.resolved > 0 ? 0 : 3;
+    return 0;
 }

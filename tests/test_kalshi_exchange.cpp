@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "core/types.hpp"
 #include "exchange/kalshi/kalshi_exchange.hpp"
 
 using namespace trader;
@@ -29,7 +30,12 @@ TEST_F(KalshiExchangeTest, InitialPositionIsEmpty) {
 
 // ===== Shadow mode =====
 
-TEST_F(KalshiExchangeTest, ShadowModePlaceOrderReturnsEmptyAndTracksNothing) {
+TEST_F(KalshiExchangeTest, ShadowModePlaceOrderSynthesizesIdAndInstantFill) {
+    // Shadow mode used to return an empty id and skip position tracking,
+    // but that produced two coupled bugs (kill-switch tripped on "empty id
+    // = order error", strategy resized to the full target every tick
+    // because position never moved). Fix: synthetic id + synthetic fill
+    // routed through on_fill. See memory project_shadow_mode_bugs.
     exchange_->set_shadow_mode(true);
     EXPECT_TRUE(exchange_->shadow_mode());
 
@@ -41,12 +47,9 @@ TEST_F(KalshiExchangeTest, ShadowModePlaceOrderReturnsEmptyAndTracksNothing) {
     o.quantity = 3;
     o.post_only = true;
     auto id = exchange_->place_order(o);
-    EXPECT_TRUE(id.empty());
-
-    // No tracked orders and no positions should exist — the call never hit
-    // the REST and the tracking path only runs on a non-empty id.
-    EXPECT_TRUE(exchange_->get_open_orders().empty());
-    EXPECT_EQ(exchange_->get_position(o.ticker).quantity, 0);
+    EXPECT_FALSE(id.empty());
+    EXPECT_NE(id.find("shadow-"), std::string::npos);
+    EXPECT_EQ(exchange_->get_position(o.ticker).quantity, 3);
 }
 
 TEST_F(KalshiExchangeTest, ShadowModeCancelAllIsNoop) {
@@ -147,8 +150,9 @@ TEST_F(KalshiExchangeTest, SettlementWinYes) {
     auto pos = exchange_->get_position("MKT1");
     EXPECT_TRUE(pos.is_settled);
     EXPECT_TRUE(pos.outcome);
-    // PnL = 5 * $1.00 - 5 * $0.40 = $3.00
-    EXPECT_DOUBLE_EQ(pos.settled_pnl, 3.0);
+    // PnL = 5 * $1.00 - 5 * $0.40 - maker fee (Kalshi ceil() schedule)
+    double fee = kalshi_maker_fee(5, 0.40);
+    EXPECT_DOUBLE_EQ(pos.settled_pnl, 5 * 1.0 - 5 * 0.40 - fee);
 }
 
 TEST_F(KalshiExchangeTest, SettlementLoseYes) {
@@ -161,8 +165,9 @@ TEST_F(KalshiExchangeTest, SettlementLoseYes) {
     auto pos = exchange_->get_position("MKT1");
     EXPECT_TRUE(pos.is_settled);
     EXPECT_FALSE(pos.outcome);
-    // PnL = -total_cost = -(3 * 0.60) = -$1.80
-    EXPECT_DOUBLE_EQ(pos.settled_pnl, -1.80);
+    // PnL = -total_cost - maker fee
+    double fee = kalshi_maker_fee(3, 0.60);
+    EXPECT_DOUBLE_EQ(pos.settled_pnl, -(3 * 0.60) - fee);
 }
 
 TEST_F(KalshiExchangeTest, SettlementWinNo) {
@@ -174,8 +179,9 @@ TEST_F(KalshiExchangeTest, SettlementWinNo) {
 
     auto pos = exchange_->get_position("MKT1");
     EXPECT_TRUE(pos.is_settled);
-    // PnL = 4 * $1.00 - 4 * $0.55 = $1.80
-    EXPECT_DOUBLE_EQ(pos.settled_pnl, 1.80);
+    // PnL = 4 * $1.00 - 4 * $0.55 - maker fee
+    double fee = kalshi_maker_fee(4, 0.55);
+    EXPECT_DOUBLE_EQ(pos.settled_pnl, 4 * 1.0 - 4 * 0.55 - fee);
 }
 
 TEST_F(KalshiExchangeTest, SettledPositionsExcludedFromExposure) {
@@ -221,7 +227,8 @@ TEST_F(KalshiExchangeTest, CheckSettlementsReturnsSettled) {
     ASSERT_EQ(settlements.size(), 1u);
     EXPECT_EQ(settlements[0].ticker, "MKT1");
     EXPECT_TRUE(settlements[0].outcome);
-    EXPECT_DOUBLE_EQ(settlements[0].pnl, 3.0);
+    double fee = kalshi_maker_fee(5, 0.40);
+    EXPECT_DOUBLE_EQ(settlements[0].pnl, 5 * 1.0 - 5 * 0.40 - fee);
     EXPECT_EQ(settlements[0].contracts, 5);
 }
 
