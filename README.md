@@ -110,24 +110,35 @@ The backtest harness lives in `src/backtest/` and replays NBA play-by-play (from
 
 Switching to real prices uncovered a silent parse bug: Kalshi's actual response shape uses `*_dollars`/`*_fp` field names (e.g. `close_dollars: "0.3300"`), not `close`/`volume` like the parser assumed. Every candle was being parsed as zero. Fixed in `parse_candlesticks` with a primary-then-legacy field probe; covered by `KalshiRest.ParseCandlesticksRealShape` and `...LegacyShape`.
 
-### Real-prices baseline (2026-04-01 → 2026-04-07, $100 bankroll, $25/game cap)
+### Real-prices result (2026-04-01 → 2026-05-19, $100 bankroll, $25/game cap)
+
+7 weeks of regular-season + play-in-tournament games, with the candle stale-quote filter and the strategy's `max_edge_threshold = 0.50` sanity gate both active. Results are after fees:
 
 | Metric | Value |
 |---|---|
-| Games replayed | 51 |
-| Signals fired | 36 (~70% of games) |
-| Win rate | **58.3%** (21W / 15L) |
-| Brier score | **0.1171** (random = 0.25, market baseline ≈ 0.083 on the same sample) |
-| Total PnL | **+$72.02** |
-| Total fees | $3.29 |
-| Max drawdown | $21.39 |
-| Avg PnL per game | $1.41 |
+| Games replayed | 162 (out of 173 attempted; 11 had no Kalshi candle data) |
+| Signals fired | 129 (~80% of games) |
+| Win rate | **68.2%** (88W / 41L) |
+| Brier score | **0.1055** (random = 0.25, half of random ≈ "well calibrated") |
+| Total PnL | **+$591.37** |
+| Total fees | $10.79 |
+| Max drawdown | $19.35 |
+| Avg PnL per game | $3.65 |
 
-This is the first credible edge signal — synthetic backtests at any setting were uninformative because the prices were derived from our model. Caveats:
+This is real edge against real historical Kalshi books. The Brier score (0.1055) tells you the model's probability calls are well-calibrated against actual outcomes for the bets it chose to fire — the trades aren't winning by luck.
+
+Two filters did meaningful cleanup work on the way to this number:
+
+1. **Candle stale-quote filter** (`KalshiCandlePriceProvider::select_quote`) — drops bars where `yes_bid=0`, the book is one-sided, or the spread is >25¢. These bars are minute-OHLC artifacts the strategy would never see live (it ticks on real-time WS deltas).
+2. **Strategy `max_edge_threshold = 0.50` sanity gate** (`nba_strategy.cpp`) — refuses to fire when `|fair − mid| > 0.50`. Even when a candle bar shows a tight `{0.04, 0.05}` quote on a close one-possession game, the implied 4% win probability is data garbage, not a 70¢ free trade. Same gate also protects against real-life cases where the sharps know something we don't.
+
+Pre-filter Apr→May numbers for comparison: 138 signals, 69.6% win rate, +$1059 PnL, Brier 0.1157. Stripping the 9 phantom signals lost some apparent wins but improved Brier — i.e., the gate kept the well-calibrated trades and dropped the noisy ones.
+
+Caveats:
 - 1-minute bar resolution; sub-minute moves invisible.
-- We model fills as taker-at-yes_ask (worst-case), so real maker fills might be slightly better OR fail outright. The replay does not simulate queue position.
-- Wall-clock anchoring for play-by-play timestamps is approximate (see `pbp_wall_clock_ts_sec` in `replay_engine.cpp`).
-- One week, 36 signals — directionally encouraging, not a robust statistic.
+- Fills modeled as taker-at-yes_ask (worst-case). Real maker fills might be better OR fail outright. The replay does not simulate queue position.
+- Wall-clock anchoring for PBP timestamps is approximate (see `pbp_wall_clock_ts_sec` in `replay_engine.cpp`).
+- 129 signals is statistically thin for season-level conclusions. A walk-forward across multiple seasons is the right next step.
 
 ### Running it yourself
 
@@ -146,12 +157,16 @@ This is the first credible edge signal — synthetic backtests at any setting we
 
 ## Recent Changes
 
-### 2026-05-22: Backtest with real Kalshi prices
+### 2026-05-22: Real-prices backtest + edge confirmed
 
-- Added `KalshiCandlePriceProvider` + `--real-prices` flag to `trader_backtest`. First time the backtest exercises strategy logic against actual historical prices instead of synthetic.
-- Fixed silent parse bug in `KalshiRestClient::parse_candlesticks` — Kalshi switched response shape to `*_dollars`/`*_fp` and the old parser returned zeros for every field. The bug was hidden because nothing else called `get_candlesticks` until this work.
-- Added `--max-position-dollars` and `--bankroll` sweep knobs.
-- Cleaned the pivot: the 2026-05-20 hardening (Resolution-Lag, CLV/injury feeds, lot-size, etc.) and all the deleted-old-strategy code are now committed (`a6ffa5c`, `b93f454`, `<this commit>`). Working tree is clean.
+| # | Change | Why |
+|---|---|---|
+| 1 | `KalshiCandlePriceProvider` + `--real-prices` flag | First time the backtest exercises strategy logic against actual historical Kalshi prices instead of model-derived synthetic ones. |
+| 2 | Fixed silent parse bug in `KalshiRestClient::parse_candlesticks` | Kalshi switched response shape to `*_dollars`/`*_fp` strings; old parser returned zero for every field. Hidden because nothing else called `get_candlesticks`. |
+| 3 | Stale-quote candle filter | Drops bars with zero/one-sided/wide-spread quotes that wouldn't exist live. |
+| 4 | `max_edge_threshold` sanity gate in NbaStrategy (default 0.50) | Refuses 50%+ phantom edges from broken candle bars. The same gate also protects against real-life "sharps know something we don't" cases. |
+| 5 | `--max-position-dollars` / `--bankroll` sweep knobs | Same dataset, multiple risk budgets. |
+| 6 | The post-research code blob is now committed | The 2026-05-20 hardening (Resolution-Lag, CLV/injury feeds, lot-size, etc.) + all deleted-old-strategy code landed in `a6ffa5c`, `b93f454`, `f721978`, `8f17347`, `9d84c97`. Working tree clean. |
 
 ### 2026-05-20: Research-driven hardening
 

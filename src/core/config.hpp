@@ -58,6 +58,9 @@ struct NbaConfig {
     // Post-2026-05-20 semantic: edge AFTER costs above target price (yes_ask
     // worst case), not edge above mid. See NbaStrategy::Config docstring.
     double min_edge_threshold = 0.02;
+    // Sanity-cap on |model - market|. > this, refuse the trade (probable
+    // stale data or news we don't see). See NbaStrategy::Config docstring.
+    double max_edge_threshold = 0.50;
     double max_spread = 0.10;
     int min_seconds_remaining = 60;            // skip final minute (formula breaks)
     int max_seconds_remaining = 1440;          // skip first half (talent-gap dominates)

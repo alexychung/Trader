@@ -396,6 +396,15 @@ std::vector<TradeSignal> NbaStrategy::generate_signals() {
                               fee_per_contract, cfg_.min_edge_threshold);
                 continue;
             }
+            const double abs_edge = std::abs(fair_yes - mid);
+            if (abs_edge > cfg_.max_edge_threshold) {
+                spdlog::debug("NBA: skip {} — |edge| {:.3f} > max {:.3f} "
+                              "(fair {:.3f} mid {:.3f}). Probable stale/broken "
+                              "candle or news we don't see.",
+                              ticker, abs_edge, cfg_.max_edge_threshold,
+                              fair_yes, mid);
+                continue;
+            }
 
             // Position size: fractional binomial Kelly, capped per game.
             const double kelly_f =

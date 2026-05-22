@@ -48,6 +48,7 @@ strategy:
 nba:
   enabled: true
   min_edge_threshold: 0.02            # fair_yes - yes_ask - fee_per_contract floor
+  max_edge_threshold: 0.50            # |fair_yes - mid| > this → refuse (probable stale data or news we don't see)
   max_spread: 0.10                    # skip markets wider than this
   min_seconds_remaining: 60           # skip final minute (model breaks)
   max_seconds_remaining: 1440         # skip first half (talent gap dominates)

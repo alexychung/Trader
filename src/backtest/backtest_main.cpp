@@ -210,6 +210,7 @@ int main(int argc, char* argv[]) {
     // Build the strategy config from the live config's NBA + reslag blocks.
     trader::backtest::ReplayConfig rcfg;
     rcfg.nba.min_edge_threshold            = cfg.nba.min_edge_threshold;
+    rcfg.nba.max_edge_threshold            = cfg.nba.max_edge_threshold;
     rcfg.nba.max_spread                    = cfg.nba.max_spread;
     rcfg.nba.min_seconds_remaining         = cfg.nba.min_seconds_remaining;
     rcfg.nba.max_seconds_remaining         = cfg.nba.max_seconds_remaining;

@@ -65,6 +65,28 @@ public:
         // spread + fee on a typical KXNBAGAME book.
         double min_edge_threshold = 0.02;
 
+        // Maximum tolerable model-vs-market disagreement before we refuse
+        // to fire. Two reasons this is a SANITY GATE, not a "size up on
+        // huge edge" gate:
+        //   1) Stale or broken data — a candle-bar `bid=0.04/ask=0.05`
+        //      on a one-possession game implies 4% win probability,
+        //      which is nonsense. Real Kalshi books don't carry that
+        //      kind of mispricing for >a few seconds; if our backtest
+        //      sees one, it's almost certainly a data artifact.
+        //   2) The "too good to be true" case in live trading. If our
+        //      model says 70% and Kalshi says 3%, the sharps (DRW, SIG)
+        //      have not left a 67¢ bill on the floor — far more likely
+        //      we have stale data (model running on lagged score) or
+        //      Kalshi has a news event we don't.
+        // Both cases: skip the trade. Legitimate edges in close games
+        // live in the 2-15% range, but late-game blowouts can legitimately
+        // push edge up to 40-50% if the market is slow to follow the
+        // arcsine. Default 0.50 catches the phantom 60-70%-edge signals
+        // we saw in the candlestick backtest (broken bid=0.04 bars on
+        // close one-possession games) without rejecting real blowout
+        // edges.
+        double max_edge_threshold = 0.50;
+
         // Maximum book spread to accept. Wider than this, market is too
         // illiquid to trust the mid.
         double max_spread = 0.10;

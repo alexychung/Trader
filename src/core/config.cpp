@@ -60,6 +60,7 @@ Config Config::load(const std::string& path) {
     if (auto n = root["nba"]) {
         if (n["enabled"])                       config.nba.enabled = n["enabled"].as<bool>();
         if (n["min_edge_threshold"])            config.nba.min_edge_threshold = n["min_edge_threshold"].as<double>();
+        if (n["max_edge_threshold"])            config.nba.max_edge_threshold = n["max_edge_threshold"].as<double>();
         if (n["max_spread"])                    config.nba.max_spread = n["max_spread"].as<double>();
         if (n["min_seconds_remaining"])         config.nba.min_seconds_remaining = n["min_seconds_remaining"].as<int>();
         if (n["max_seconds_remaining"])         config.nba.max_seconds_remaining = n["max_seconds_remaining"].as<int>();
