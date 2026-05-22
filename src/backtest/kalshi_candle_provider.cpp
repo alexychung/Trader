@@ -227,11 +227,9 @@ bool KalshiCandlePriceProvider::prefetch_game(
 }
 
 std::optional<IKalshiPriceProvider::Quote>
-KalshiCandlePriceProvider::get_quote(const std::string& ticker,
-                                      int64_t wall_clock_ts_sec) {
-    auto it = by_ticker_.find(ticker);
-    if (it == by_ticker_.end() || it->second.empty()) return std::nullopt;
-    const auto& candles = it->second;
+KalshiCandlePriceProvider::select_quote(
+    const std::vector<KalshiCandle>& candles, int64_t wall_clock_ts_sec) {
+    if (candles.empty()) return std::nullopt;
     // 1-minute bars labeled by end_period_ts. The bar covering
     // wall_clock_ts_sec is the first whose end >= wall_clock_ts_sec.
     auto cand_it = std::lower_bound(
@@ -244,10 +242,21 @@ KalshiCandlePriceProvider::get_quote(const std::string& ticker,
         cand_it = std::prev(candles.end());
     }
     const auto& c = *cand_it;
-    // Skip "no-trade" bars where Kalshi reports zero bid/ask. The
-    // strategy treats a 0/0 quote as a malformed market — better to
-    // return nullopt and let it skip the tick.
-    if (c.yes_bid_close <= 0.0 && c.yes_ask_close <= 0.0) {
+    // Skip stale/broken bars. Three filter rules:
+    //   1) Zero bid AND zero ask → "no quote was active in this bar"
+    //      (Kalshi reports the bar but with empty fields). Common
+    //      pre-tipoff and post-settle.
+    //   2) One-sided book (bid=0 XOR ask=0) → almost always a stale
+    //      artifact; the strategy live would never see this because
+    //      it ticks on real-time WS deltas, not minute-OHLC.
+    //   3) Spread > 25¢ → broken/parked book. Without this filter the
+    //      strategy fires phantom 50–70% edge signals against
+    //      candles like {bid=0.04, ask=0.05} when the reality was
+    //      {0.49, 0.51} elsewhere in the bar.
+    const double spread = c.yes_ask_close - c.yes_bid_close;
+    const bool zero_both = c.yes_bid_close <= 0.0 && c.yes_ask_close <= 0.0;
+    const bool one_sided = c.yes_bid_close <= 0.0 || c.yes_ask_close <= 0.0;
+    if (zero_both || one_sided || spread > 0.25 || spread < 0.0) {
         return std::nullopt;
     }
     Quote q;
@@ -255,6 +264,14 @@ KalshiCandlePriceProvider::get_quote(const std::string& ticker,
     q.yes_ask = c.yes_ask_close;
     q.volume = c.volume;
     return q;
+}
+
+std::optional<IKalshiPriceProvider::Quote>
+KalshiCandlePriceProvider::get_quote(const std::string& ticker,
+                                      int64_t wall_clock_ts_sec) {
+    auto it = by_ticker_.find(ticker);
+    if (it == by_ticker_.end()) return std::nullopt;
+    return select_quote(it->second, wall_clock_ts_sec);
 }
 
 } // namespace trader::backtest

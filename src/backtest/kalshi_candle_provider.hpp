@@ -67,8 +67,16 @@ public:
     int cache_misses() const { return cache_misses_; }
     int empty_fetches() const { return empty_fetches_; }
 
-private:
     using KalshiCandle = ::trader::kalshi::KalshiRestClient::KalshiCandle;
+
+    // Pure quote-selection logic — picks the candle covering `ts`, applies
+    // the stale-quote filter, returns the resulting Quote (or nullopt).
+    // Exposed for unit testing without a live REST client. Assumes
+    // `candles` is sorted ascending by end_period_ts.
+    static std::optional<Quote> select_quote(
+        const std::vector<KalshiCandle>& candles, int64_t wall_clock_ts_sec);
+
+private:
 
     // Resolve KXNBAGAME series ticker — the Kalshi candlestick endpoint
     // is GET /series/{series}/markets/{ticker}/candlesticks, and NBA

@@ -118,6 +118,7 @@ add_executable(trader_tests
     tests/test_nba_score_feed.cpp
     tests/test_nba_strategy.cpp
     tests/test_resolution_lag_strategy.cpp
+    tests/test_kalshi_candle_provider.cpp
 )
 target_link_libraries(trader_tests PRIVATE
     trader_core
