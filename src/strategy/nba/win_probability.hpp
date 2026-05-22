@@ -59,6 +59,45 @@ public:
     // accuracy ~1.15e-9 across the central 99.99% of the distribution. Public
     // for direct testing.
     static double inverse_normal_cdf(double p);
+
+    // === Logit-space helpers (#5, 2026-05-20) ===
+    //
+    // The arcsine model lives in PRICE space, but Dalen 2025 (arXiv 2510.15205,
+    // "Toward Black-Scholes for Prediction Markets") points out that binary
+    // contracts are better analyzed in LOGIT space: L = log(p / (1 - p)).
+    // In logit space:
+    //   - The price boundaries (0 and 1) map to ±∞, so a constant-volatility
+    //     diffusion model doesn't pile up against them.
+    //   - Belief volatility (the volatility of L) is more stable across price
+    //     levels than price volatility — making it more meaningful when
+    //     comparing risk on a 0.10 contract vs. a 0.50 one.
+    //
+    // We're not running a full MM strategy (research showed pure MM is
+    // dominated at our scale), but these helpers are here for two reasons:
+    //   1) A future adaptive quote-skew (Avellaneda-Stoikov in logit space)
+    //      will need them.
+    //   2) Risk reporting: logit-vol is the right unit for "how uncertain
+    //      should I be about this contract."
+
+    // Forward: price → logit. Clamps inputs to (eps, 1-eps) to avoid ±inf
+    // at the boundaries.
+    static double price_to_logit(double p);
+
+    // Inverse: logit → price. = 1 / (1 + exp(-L)).
+    static double logit_to_price(double L);
+
+    // Reservation-price formula in logit space (Avellaneda-Stoikov adaptation).
+    // Given a fair mid `p_mid`, inventory `q` (signed contract count), risk-
+    // aversion `gamma`, belief volatility per √sec `sigma_logit`, and time
+    // to resolution in seconds `T`:
+    //
+    //     L_r = logit(p_mid) − q · gamma · sigma_logit² · T
+    //     p_r = sigmoid(L_r)
+    //
+    // Returns p_r. When q == 0 this reduces to p_mid.
+    static double logit_reservation_price(double p_mid, int inventory,
+                                           double gamma, double sigma_logit,
+                                           double t_seconds_remaining);
 };
 
 } // namespace trader::nba

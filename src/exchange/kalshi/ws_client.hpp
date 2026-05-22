@@ -66,6 +66,10 @@ struct WsMarketUpdate {
 using OnMarketUpdateCb = std::function<void(const WsMarketUpdate&)>;
 using OnFillCb = std::function<void(const WsFill&)>;
 using OnErrorCb = std::function<void(const std::string&)>;
+// Fired after a successful reconnect + subscription replay. The caller is
+// expected to trigger a REST fill reconcile to close any gap window — WS
+// alone doesn't replay missed fills on reconnect (fix #6, 2026-05-20).
+using OnReconnectCb = std::function<void()>;
 // Signals a detected sequence gap on a given channel/ticker. The caller
 // (or the client itself) must resubscribe and apply a fresh snapshot —
 // Kalshi does not provide an incremental resync endpoint.
@@ -145,6 +149,10 @@ public:
     void set_on_fill(OnFillCb cb) { on_fill_ = std::move(cb); }
     void set_on_error(OnErrorCb cb) { on_error_ = std::move(cb); }
     void set_on_seq_gap(OnSeqGapCb cb) { on_seq_gap_ = std::move(cb); }
+    // Fires after each successful reconnect + replay_subscriptions completes.
+    // Use to trigger REST fill reconcile so fills delivered during the
+    // outage are recovered. Without this, WS reconnect leaves a gap window.
+    void set_on_reconnect(OnReconnectCb cb) { on_reconnect_ = std::move(cb); }
 
     // Returns the last-observed sequence on a channel for a ticker. 0 if never seen.
     int64_t last_seq(const std::string& channel, const std::string& ticker) const;
@@ -225,6 +233,7 @@ private:
     OnFillCb on_fill_;
     OnErrorCb on_error_;
     OnSeqGapCb on_seq_gap_;
+    OnReconnectCb on_reconnect_;
 };
 
 } // namespace trader::kalshi

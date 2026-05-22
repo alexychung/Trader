@@ -30,7 +30,6 @@ risk:
 
 strategy:
   min_edge_threshold: 0.08
-  min_spread_to_mm: 0.10
   kelly_fraction: 0.30
   tick_interval_seconds: 45
 
@@ -76,7 +75,6 @@ TEST_F(ConfigTest, LoadsRiskSection) {
 TEST_F(ConfigTest, LoadsStrategySection) {
     auto config = Config::load(test_config_path_);
     EXPECT_DOUBLE_EQ(config.strategy.min_edge_threshold, 0.08);
-    EXPECT_DOUBLE_EQ(config.strategy.min_spread_to_mm, 0.10);
     EXPECT_DOUBLE_EQ(config.strategy.kelly_fraction, 0.30);
     EXPECT_EQ(config.strategy.tick_interval_seconds, 45);
 }

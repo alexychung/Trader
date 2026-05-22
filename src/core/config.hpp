@@ -24,15 +24,8 @@ struct RiskConfig {
 struct StrategyConfig {
     double min_edge_threshold = 0.08;
     double min_confidence = 0.30;
-    double min_spread_to_mm = 0.08;
     double kelly_fraction = 0.25;
     int tick_interval_seconds = 60;
-    // When true, only settled-max weather signals (post-peak observations
-    // locked, near-certain outcomes) fire real trades. Pre-peak ensemble
-    // predictions still shadow-log for Brier calibration but never size
-    // positions. This is the conservative live posture — ensemble edge
-    // remains unproven at $100 bankroll, settled-max is defensible.
-    bool settled_max_only = true;
 };
 
 struct LoggingConfig {
@@ -56,48 +49,61 @@ struct AlertsConfig {
     double balance_change_pct = 0.05;
 };
 
-// External data-feed credentials. All optional — BLS works without a key at a
-// lower rate limit; Open-Meteo and NWS require no key at all. FRED requires
-// a key for any meaningful use and will 401 without one.
-struct FeedsConfig {
-    std::string bls_api_key;   // https://data.bls.gov/registrationEngine/
-    std::string fred_api_key;  // https://fred.stlouisfed.org/docs/api/api_key.html
-    std::string open_meteo_base_url = "https://ensemble-api.open-meteo.com/v1/ensemble";
-    int refresh_hours = 6;     // how stale before we re-pull the weather ensemble
-};
-
-// NBA in-game trading config. Disabled by default — flip `enabled: true`
-// in config.yaml to spin up the NBA strategy alongside the existing weather
-// strategy. Both share the same exchange / risk_manager / calibration —
-// position quantities and daily PnL aggregate across categories.
-//
-// Default thresholds reflect the v1 arcsine strategy: only trades during
-// the back half of regulation, on near-certain garbage-time or comeback
-// mispricings. Tune via paper trading.
+// NBA in-game trading config. The bot's sole strategy after the weather/econ
+// pivot. Default thresholds reflect the v1 arcsine "safe-lead" strategy: only
+// trades during the back half of regulation, on near-certain garbage-time or
+// comeback mispricings. Tune via paper trading.
 struct NbaConfig {
     bool enabled = false;
-    double min_edge_threshold = 0.04;          // 4¢ — sports edges are thinner than weather
+    // Post-2026-05-20 semantic: edge AFTER costs above target price (yes_ask
+    // worst case), not edge above mid. See NbaStrategy::Config docstring.
+    double min_edge_threshold = 0.02;
     double max_spread = 0.10;
     int min_seconds_remaining = 60;            // skip final minute (formula breaks)
     int max_seconds_remaining = 1440;          // skip first half (talent-gap dominates)
     double max_position_per_game_dollars = 50.0;
     double kelly_fraction = 0.25;
     int scoreboard_poll_seconds = 5;           // cdn.nba.com refresh cadence
+
+    // High-confidence gate (improved-directional v2). Trades only fire when
+    // |home_lead| >= min_abs_score_diff AND (home_wp outside [max_uncertain_wp,
+    // min_strong_wp]). Arcsine is most accurate when one side dominates; tight
+    // games produce noisy probabilities that get picked off.
+    int min_abs_score_diff = 8;
+    double max_uncertain_wp = 0.30;
+    double min_strong_wp = 0.70;
+
+    // 2026-05-20 additions (research-driven improvements).
+    int min_lot_size = 5;            // skip orders smaller than this (fee ceil)
+    double quote_jitter_pct = 0.20;  // ±jitter on poll cadence (anti-HFT)
+    double min_clv_edge = 0.02;      // min Kalshi-vs-Pinnacle drift (mid below sharp fair)
+    int min_market_volume = 100;     // skip markets with low total volume (stale-book guard)
+    double default_pregame_spread = 0.0;  // points, positive = home favored
 };
 
-// Market-filter thresholds. Mirrors kalshi::FilterConfig but as a plain
-// struct Config can load from YAML without pulling in the strategy header.
-// `main.cpp` translates this to a kalshi::FilterConfig and hands it to
-// MarketFilter. Settings here let you tune the strategy for demo (thin
-// books → relax min_volume) vs prod (deeper books → tighten everything)
-// without a rebuild.
-struct FilterThresholds {
-    int min_volume = 50;
-    double min_spread = 0.03;    // narrower = illiquid / no edge
-    double max_spread = 0.30;    // wider = placeholder book (bid=0/ask=1)
-    double min_price = 0.15;     // skip cheap (favorite-longshot bias)
-    double max_price = 0.85;     // skip expensive (same reason mirrored)
-    bool skip_fractional_markets = false;
+// Resolution-lag arb strategy config (new strategy 2026-05-20). See
+// src/strategy/nba/resolution_lag_strategy.hpp for the thesis.
+struct ResolutionLagConfig {
+    bool enabled = true;
+    int cutoff_clock_seconds = 120;
+    int cutoff_lead_points = 15;
+    bool include_status_final = true;
+    double min_entry_price = 0.94;
+    double max_entry_price = 0.99;
+    double max_position_per_game_dollars = 25.0;
+    int min_lot_size = 5;
+    int min_market_volume = 50;
+};
+
+// Optional external-data-feed credentials. Used by:
+//   - SharpBookProvider (Pinnacle CLV gate, #1)
+//   - InjuryNewsFeed (#3)
+// Both default to NullProvider stubs when no credentials are supplied,
+// keeping the bot functional in standalone mode.
+struct FeedsConfig {
+    std::string oddsapi_key;       // https://the-odds-api.com — 500 req/mo free
+    std::string espn_injury_url =
+        "https://www.espn.com/nba/injuries";  // public HTML, no key
 };
 
 struct Config {
@@ -109,9 +115,9 @@ struct Config {
     LoggingConfig logging;
     PathsConfig paths;
     AlertsConfig alerts;
-    FeedsConfig feeds;
-    FilterThresholds filter;
     NbaConfig nba;
+    ResolutionLagConfig resolution_lag;
+    FeedsConfig feeds;
 
     static Config load(const std::string& path);
 };

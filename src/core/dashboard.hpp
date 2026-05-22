@@ -3,7 +3,6 @@
 #include "risk/risk_manager.hpp"
 #include "risk/kill_switch.hpp"
 #include "strategy/kalshi/calibration.hpp"
-#include "strategy/kalshi/event_strategy.hpp"
 #include "exchange/kalshi/kalshi_exchange.hpp"
 #include <string>
 #include <sstream>

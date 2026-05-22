@@ -43,6 +43,14 @@ struct NbaGameSnapshot {
     int home_score = 0;
     int away_score = 0;
 
+    // Pregame point spread for this matchup, sign convention: positive
+    // means HOME is favored by this many points (e.g. +5.5 means home is
+    // a 5.5-point favorite). The scoreboard feed doesn't populate this —
+    // it's a slot for a sharp-book or pregame-odds feed to fill in. When
+    // 0 (default), the strategy falls back to NbaStrategy::Config
+    // default_pregame_spread, which is also 0 (equal-strength assumption).
+    double pregame_spread = 0.0;
+
     // Convenience accessors.
     bool is_live() const { return game_status == 2; }
     bool is_final() const { return game_status == 3; }

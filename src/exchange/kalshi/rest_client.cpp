@@ -176,7 +176,8 @@ std::vector<KalshiMarket> KalshiRestClient::get_markets(const std::string& categ
 }
 
 std::vector<KalshiMarket> KalshiRestClient::get_markets_paginated(
-    const std::string& status, int page_limit, int max_pages) {
+    const std::string& status, int page_limit, int max_pages,
+    const std::string& series_ticker) {
     std::vector<KalshiMarket> all;
     std::string cursor;
     int pages = 0;
@@ -184,6 +185,7 @@ std::vector<KalshiMarket> KalshiRestClient::get_markets_paginated(
     while (pages < max_pages) {
         std::string path = "/markets?limit=" + std::to_string(page_limit);
         if (!status.empty()) path += "&status=" + status;
+        if (!series_ticker.empty()) path += "&series_ticker=" + series_ticker;
         if (!cursor.empty()) path += "&cursor=" + cursor;
 
         // Transient 4xx/5xx have been observed on /markets in production
@@ -291,6 +293,91 @@ KalshiOrderbook KalshiRestClient::get_orderbook(const std::string& ticker) {
         spdlog::error("Failed to parse orderbook response: {}", e.what());
     }
     return book;
+}
+
+std::vector<KalshiRestClient::KalshiCandle>
+KalshiRestClient::get_candlesticks(const std::string& series_ticker,
+                                    const std::string& ticker,
+                                    int64_t start_ts_sec,
+                                    int64_t end_ts_sec,
+                                    int period_interval_min) {
+    // GET /series/{series}/markets/{ticker}/candlesticks
+    //   ?start_ts=...&end_ts=...&period_interval=...
+    std::ostringstream path;
+    path << "/series/" << series_ticker << "/markets/" << ticker
+         << "/candlesticks"
+         << "?start_ts=" << start_ts_sec
+         << "&end_ts=" << end_ts_sec
+         << "&period_interval=" << period_interval_min;
+    auto resp = get(path.str());
+    if (!resp.ok()) {
+        spdlog::warn("get_candlesticks {} failed: HTTP {} body[0:200]={}",
+                     ticker, resp.status_code, resp.body.substr(0, 200));
+        return {};
+    }
+    try {
+        auto j = nlohmann::json::parse(resp.body);
+        return parse_candlesticks(j);
+    } catch (const nlohmann::json::exception& e) {
+        spdlog::error("Failed to parse candlesticks for {}: {}", ticker, e.what());
+        return {};
+    }
+}
+
+std::vector<KalshiRestClient::KalshiCandle>
+KalshiRestClient::parse_candlesticks(const nlohmann::json& body) {
+    std::vector<KalshiCandle> out;
+    if (!body.contains("candlesticks") || !body["candlesticks"].is_array()) {
+        return out;
+    }
+    auto read_price = [](const nlohmann::json& obj, const char* key) -> double {
+        if (!obj.contains(key) || obj[key].is_null()) return 0.0;
+        const auto& v = obj[key];
+        if (v.is_string()) {
+            try { return std::stod(v.get<std::string>()); }
+            catch (...) { return 0.0; }
+        }
+        if (v.is_number()) return v.get<double>();
+        return 0.0;
+    };
+    auto read_int = [](const nlohmann::json& obj, const char* key) -> int {
+        if (!obj.contains(key) || obj[key].is_null()) return 0;
+        const auto& v = obj[key];
+        if (v.is_number_integer()) return v.get<int>();
+        if (v.is_number()) return static_cast<int>(v.get<double>());
+        if (v.is_string()) {
+            try { return std::stoi(v.get<std::string>()); }
+            catch (...) { return 0; }
+        }
+        return 0;
+    };
+    for (const auto& c : body["candlesticks"]) {
+        KalshiCandle k;
+        if (c.contains("end_period_ts")) {
+            if (c["end_period_ts"].is_number_integer()) {
+                k.end_period_ts = c["end_period_ts"].get<int64_t>();
+            } else if (c["end_period_ts"].is_number()) {
+                k.end_period_ts = static_cast<int64_t>(c["end_period_ts"].get<double>());
+            }
+        }
+        k.open_interest = read_int(c, "open_interest");
+        k.volume = read_int(c, "volume");
+        if (c.contains("price") && c["price"].is_object()) {
+            const auto& p = c["price"];
+            k.price_open  = read_price(p, "open");
+            k.price_high  = read_price(p, "high");
+            k.price_low   = read_price(p, "low");
+            k.price_close = read_price(p, "close");
+        }
+        if (c.contains("yes_bid") && c["yes_bid"].is_object()) {
+            k.yes_bid_close = read_price(c["yes_bid"], "close");
+        }
+        if (c.contains("yes_ask") && c["yes_ask"].is_object()) {
+            k.yes_ask_close = read_price(c["yes_ask"], "close");
+        }
+        out.push_back(k);
+    }
+    return out;
 }
 
 namespace {
@@ -621,8 +708,23 @@ double KalshiRestClient::get_balance() {
 
     try {
         auto j = nlohmann::json::parse(resp.body);
-        // Balance is a dollar decimal string in 2026 format. Numeric fallback
-        // kept defensively; shared helper handles both.
+        // Kalshi 2026 prod returns TWO balance fields with different units:
+        //   - top-level "balance": <int>  in CENTS (e.g. 10000 = $100.00)
+        //   - "balance_breakdown":[{"balance":"<dollar string>", ...}]
+        //     in DOLLARS as a string (e.g. "100.0000" = $100.00)
+        // Prior implementation read the top-level numeric as dollars and was
+        // 100× too high. We now prefer the breakdown (cleaner units) and fall
+        // back to top-level-as-cents.
+        if (j.contains("balance_breakdown") && j["balance_breakdown"].is_array()
+            && !j["balance_breakdown"].empty()) {
+            const auto& first = j["balance_breakdown"][0];
+            if (first.contains("balance")) {
+                return parse_kalshi_price(first, "balance");
+            }
+        }
+        if (j.contains("balance") && j["balance"].is_number()) {
+            return j["balance"].get<double>() / 100.0;
+        }
         return parse_kalshi_price(j, "balance");
     } catch (const nlohmann::json::exception& e) {
         spdlog::error("Failed to parse balance response: {}", e.what());
@@ -667,6 +769,41 @@ OrderId KalshiRestClient::place_order(const std::string& ticker, const std::stri
 bool KalshiRestClient::cancel_order(const OrderId& order_id) {
     auto resp = del("/portfolio/orders/" + order_id);
     return resp.ok();
+}
+
+bool KalshiRestClient::amend_order(const OrderId& order_id, double new_price,
+                                    int new_quantity) {
+    if (order_id.empty()) return false;
+    if (new_price <= 0.0 && new_quantity <= 0) return false;
+
+    nlohmann::json body = nlohmann::json::object();
+    if (new_price > 0.0) {
+        // Wire format mirrors place_order (2026 API):
+        //   yes_price_dollars: "<4-decimal-string>"  in YES-native space
+        // The original implementation sent an int-cents `yes_price` field —
+        // wrong API shape; would silently fail or be reinterpreted. Fixed
+        // 2026-05-20.
+        if (new_price <= 0.0 || new_price >= 1.0) {
+            spdlog::warn("amend_order: price {} out of (0, 1) range", new_price);
+            return false;
+        }
+        body["yes_price_dollars"] = price_to_kalshi_string(new_price);
+    }
+    if (new_quantity > 0) {
+        // count_fp matches place_order; some Kalshi endpoints accept either
+        // `count` (int) or `count_fp` (string). Standardize on the place_order
+        // convention.
+        body["count_fp"] = count_to_kalshi_fp_string(new_quantity);
+    }
+
+    auto resp = post("/portfolio/orders/" + order_id + "/amend", body);
+    if (!resp.ok()) {
+        spdlog::warn("amend_order failed: HTTP {} body[0:200]={}",
+                     resp.status_code,
+                     resp.body.substr(0, std::min<std::size_t>(200, resp.body.size())));
+        return false;
+    }
+    return true;
 }
 
 std::optional<std::vector<OrderId>> KalshiRestClient::batch_cancel_orders(
@@ -795,6 +932,42 @@ void KalshiRestClient::refresh_markets_by_ticker_prefix(
     spdlog::info("refresh_markets_by_ticker_prefix(prefix=[{}], exclude=[{}]): "
                  "{}/{} markets kept ({} dropped as closed/settled)",
                  joined_p, joined_e, kept, static_cast<int>(markets.size()),
+                 dropped_closed);
+    int shown = 0;
+    for (const auto& [t, m] : market_cache_) {
+        if (shown >= 3) break;
+        spdlog::info("  sample: {} status='{}' yes_bid={:.4f} yes_ask={:.4f}",
+                     t, m.status, m.yes_bid, m.yes_ask);
+        ++shown;
+    }
+}
+
+void KalshiRestClient::refresh_markets_by_series(const std::string& series_ticker,
+                                                  int page_limit) {
+    // Server-side series filter — Kalshi returns only markets for the named
+    // series. Prod's open catalog is ~300k entries and our series-of-interest
+    // (KXNBAGAME) sorts well past any sane page cap, so the prefix-walk in
+    // refresh_markets_by_ticker_prefix returns 0/300000 on prod even though
+    // the markets exist. This path queries ?series_ticker= directly — one
+    // round-trip per page covers the whole series in ~20 markets.
+    market_cache_.clear();
+
+    auto markets = get_markets_paginated("open", page_limit,
+                                          /*max_pages=*/10, series_ticker);
+    auto is_tradeable_status = [](const std::string& s) {
+        return s == "active" || s == "open" || s.empty();
+    };
+    int kept = 0, dropped_closed = 0;
+    for (auto& m : markets) {
+        if (!is_tradeable_status(m.status)) { ++dropped_closed; continue; }
+        market_cache_[m.ticker] = std::move(m);
+        ++kept;
+    }
+    cache_time_ = std::chrono::system_clock::now();
+
+    spdlog::info("refresh_markets_by_series(series={}): {}/{} markets kept "
+                 "({} dropped as closed/settled)",
+                 series_ticker, kept, static_cast<int>(markets.size()),
                  dropped_closed);
     int shown = 0;
     for (const auto& [t, m] : market_cache_) {

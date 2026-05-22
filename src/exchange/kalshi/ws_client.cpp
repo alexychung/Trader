@@ -207,6 +207,21 @@ void KalshiWsClient::run_live_loop() {
             // Every active subscription must be re-issued after the handshake.
             replay_subscriptions();
 
+            // Fire reconnect callback so the caller can run a REST fill
+            // reconcile to close the gap window. Subscriptions alone don't
+            // backfill fills delivered during the outage (fix #6, 2026-05-20).
+            // Skip on the very first connect (attempt was just reset above
+            // and connected_ was false coming in) is NOT what we want —
+            // running the reconcile on first connect is harmless and useful
+            // (catches fills since last bot restart).
+            if (on_reconnect_) {
+                try {
+                    on_reconnect_();
+                } catch (const std::exception& e) {
+                    spdlog::warn("on_reconnect callback threw: {}", e.what());
+                }
+            }
+
             // Async read loop. Each completion schedules the next read and
             // dispatches to process_message(). Errors surface via session_failed.
             std::function<void()> do_read;

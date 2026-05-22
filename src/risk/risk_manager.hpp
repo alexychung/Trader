@@ -30,9 +30,14 @@ public:
     // Pre-trade gate: ALL checks must pass
     TradeCheck check_trade(const std::string& ticker, int quantity, double price) const;
 
-    // Position updates
+    // Position updates. `fee` is the maker/taker fee paid on this fill
+    // (positive number, in dollars). Defaults to 0.0 for back-compat with
+    // tests; production callers (KalshiExchange) always pass the real fee
+    // so RiskManager's balance stays in sync with the exchange-side balance.
+    // Without this, sizing math drifts upward by accumulated fees over the
+    // course of a session.
     void on_fill(const std::string& ticker, const std::string& contract_side,
-                 int quantity, double price);
+                 int quantity, double price, double fee = 0.0);
     void on_settlement(const std::string& ticker, double pnl);
 
     // State queries

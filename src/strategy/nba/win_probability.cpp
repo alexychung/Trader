@@ -68,4 +68,28 @@ double WinProbability::survival_probability(double lead_points,
     return 0.5 * (1.0 + std::erf(lead_points / denom));
 }
 
+// === Logit-space helpers ===
+
+double WinProbability::price_to_logit(double p) {
+    constexpr double eps = 1e-9;
+    p = std::clamp(p, eps, 1.0 - eps);
+    return std::log(p / (1.0 - p));
+}
+
+double WinProbability::logit_to_price(double L) {
+    return 1.0 / (1.0 + std::exp(-L));
+}
+
+double WinProbability::logit_reservation_price(double p_mid, int inventory,
+                                                 double gamma,
+                                                 double sigma_logit,
+                                                 double t_seconds_remaining) {
+    if (t_seconds_remaining <= 0.0 || inventory == 0) return p_mid;
+    const double L_mid = price_to_logit(p_mid);
+    const double L_r = L_mid - static_cast<double>(inventory) * gamma *
+                                  sigma_logit * sigma_logit *
+                                  t_seconds_remaining;
+    return logit_to_price(L_r);
+}
+
 } // namespace trader::nba

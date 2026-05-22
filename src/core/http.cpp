@@ -103,8 +103,13 @@ HttpResult do_request(http::verb verb, const std::string& url,
 
         beast::get_lowest_layer(stream).expires_after(kOpTimeout);
         beast::flat_buffer buffer;
-        http::response<http::string_body> res;
-        http::read(stream, buffer, res);
+        // Use a response_parser so we can raise the body size cap. Beast's
+        // default is 1MB; the NBA league schedule JSON (~8.4MB) blows past
+        // that. 32MB is a generous ceiling for the data sources we use.
+        http::response_parser<http::string_body> parser;
+        parser.body_limit(32 * 1024 * 1024);
+        http::read(stream, buffer, parser);
+        auto& res = parser.get();
 
         beast::error_code ec;
         stream.shutdown(ec);

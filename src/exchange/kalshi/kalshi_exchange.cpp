@@ -313,7 +313,7 @@ void KalshiExchange::on_fill(const WsFill& fill) {
     const int signed_qty = is_buy ? fill.count : -fill.count;
     {
         std::lock_guard<std::mutex> lock(balance_mutex_);
-        update_position_on_fill(fill.ticker, fill.side, fill.price, signed_qty);
+        update_position_on_fill(fill.ticker, fill.side, fill.price, signed_qty, fee);
         if (is_buy) {
             balance_ -= fill.price * fill.count + fee;  // Debit + fee
         } else {
@@ -325,7 +325,10 @@ void KalshiExchange::on_fill(const WsFill& fill) {
     // stream. Without these, the pre-trade risk gate and cluster exposure
     // cap both operate on stale data after the first fill.
     if (risk_manager_) {
-        risk_manager_->on_fill(fill.ticker, fill.side, signed_qty, fill.price);
+        // Pass `fee` so RiskManager's balance stays in lockstep with the
+        // exchange-side balance. Without this, risk_manager.balance() drifts
+        // upward by accumulated fees over a session — Kelly sizing overshoots.
+        risk_manager_->on_fill(fill.ticker, fill.side, signed_qty, fill.price, fee);
     }
     if (cluster_limiter_) {
         // Buy adds cost; sell reduces cluster exposure by the same cash amount.
@@ -429,11 +432,16 @@ int KalshiExchange::seed_positions_from_rest() {
 
 void KalshiExchange::update_position_on_fill(const std::string& ticker,
                                                 const std::string& contract_side,
-                                                double price, int quantity) {
+                                                double price, int quantity,
+                                                double fee) {
     std::lock_guard<std::mutex> lock(positions_mutex_);
     auto& pos = positions_[ticker];
     pos.ticker = ticker;
     pos.contract_side = contract_side;
+
+    // Accumulate fees so settled_pnl can subtract them later (fix #5).
+    // Settlement is fee-free; this is entry-side only.
+    pos.fees_paid += fee;
 
     if (quantity > 0) {
         // Adding to position
@@ -469,13 +477,16 @@ void KalshiExchange::on_settlement(const std::string& ticker, bool outcome) {
         bool yes_won = outcome;
 
         if ((we_hold_yes && yes_won) || (!we_hold_yes && !yes_won)) {
-            // We win: receive $1.00 per contract
-            pos.settled_pnl = (1.0 * pos.quantity) - pos.total_cost;
+            // We win: receive $1.00 per contract. Net PnL subtracts entry
+            // cost AND the cumulative fees we paid to build the position.
+            // Without -fees_paid here, calibration logs (and reported PnL)
+            // overstate profit by the fee total — see fix #5 (2026-05-20).
+            pos.settled_pnl = (1.0 * pos.quantity) - pos.total_cost - pos.fees_paid;
             std::lock_guard<std::mutex> block(balance_mutex_);
             balance_ += 1.0 * pos.quantity;
         } else {
-            // We lose: contracts worthless
-            pos.settled_pnl = -pos.total_cost;
+            // We lose: contracts worthless. PnL is the full cost AND fees.
+            pos.settled_pnl = -pos.total_cost - pos.fees_paid;
         }
         settled_pnl = pos.settled_pnl;
 

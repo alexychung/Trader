@@ -44,6 +44,11 @@ struct MarketPosition {
     int quantity = 0;
     double avg_cost = 0.0;
     double total_cost = 0.0;    // sum of entry prices * quantities
+    // Cumulative fees paid on this position (entry side only — settlement is
+    // fee-free per Kalshi). Subtracted from settled_pnl so reported PnL
+    // matches actual cash impact. Without this, PnL is overstated by all
+    // fees paid to build the position (fix #5, 2026-05-20).
+    double fees_paid = 0.0;
     bool is_settled = false;
     bool outcome = false;
     double settled_pnl = 0.0;
@@ -142,7 +147,7 @@ public:
 
 private:
     void update_position_on_fill(const std::string& ticker, const std::string& contract_side,
-                                  double price, int quantity);
+                                  double price, int quantity, double fee = 0.0);
 
     KalshiAuth& auth_;
     KalshiRestClient rest_;

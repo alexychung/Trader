@@ -64,7 +64,7 @@ TradeCheck RiskManager::check_trade(const std::string& ticker, int quantity, dou
 }
 
 void RiskManager::on_fill(const std::string& ticker, const std::string& contract_side,
-                           int quantity, double price) {
+                           int quantity, double price, double fee) {
     // quantity > 0 = buy, quantity < 0 = sell
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -73,12 +73,12 @@ void RiskManager::on_fill(const std::string& ticker, const std::string& contract
     pos.contract_side = contract_side;
 
     if (quantity > 0) {
-        // Buy: increase position, debit balance
+        // Buy: increase position, debit balance (cost + fee)
         pos.quantity += quantity;
         pos.cost += price * quantity;
-        balance_ -= price * quantity;
+        balance_ -= price * quantity + fee;
     } else {
-        // Sell: reduce position, credit balance
+        // Sell: reduce position, credit balance (proceeds - fee)
         int reduce = -quantity;
         int actual_reduce = std::min(reduce, pos.quantity);
         if (pos.quantity > 0 && actual_reduce > 0) {
@@ -86,7 +86,7 @@ void RiskManager::on_fill(const std::string& ticker, const std::string& contract
             pos.quantity -= actual_reduce;
             pos.cost = pos.quantity * avg;
         }
-        balance_ += price * reduce;
+        balance_ += price * reduce - fee;
     }
 
     if (pos.quantity > 0) {

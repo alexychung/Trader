@@ -41,10 +41,8 @@ Config Config::load(const std::string& path) {
     if (auto s = root["strategy"]) {
         if (s["min_edge_threshold"])    config.strategy.min_edge_threshold = s["min_edge_threshold"].as<double>();
         if (s["min_confidence"])        config.strategy.min_confidence = s["min_confidence"].as<double>();
-        if (s["min_spread_to_mm"])      config.strategy.min_spread_to_mm = s["min_spread_to_mm"].as<double>();
         if (s["kelly_fraction"])        config.strategy.kelly_fraction = s["kelly_fraction"].as<double>();
         if (s["tick_interval_seconds"]) config.strategy.tick_interval_seconds = s["tick_interval_seconds"].as<int>();
-        if (s["settled_max_only"])      config.strategy.settled_max_only = s["settled_max_only"].as<bool>();
     }
 
     if (auto l = root["logging"]) {
@@ -59,29 +57,6 @@ Config Config::load(const std::string& path) {
         if (p["calibration_file"]) config.paths.calibration_file = p["calibration_file"].as<std::string>();
     }
 
-    if (auto f = root["feeds"]) {
-        // Nested shape: feeds.bls.api_key / feeds.fred.api_key (matches config.example.yaml).
-        if (auto bls = f["bls"]) {
-            if (bls["api_key"]) config.feeds.bls_api_key = bls["api_key"].as<std::string>();
-        }
-        if (auto fred = f["fred"]) {
-            if (fred["api_key"]) config.feeds.fred_api_key = fred["api_key"].as<std::string>();
-        }
-        if (auto om = f["open_meteo"]) {
-            if (om["base_url"])      config.feeds.open_meteo_base_url = om["base_url"].as<std::string>();
-            if (om["refresh_hours"]) config.feeds.refresh_hours = om["refresh_hours"].as<int>();
-        }
-    }
-
-    if (auto flt = root["filter"]) {
-        if (flt["min_volume"])              config.filter.min_volume = flt["min_volume"].as<int>();
-        if (flt["min_spread"])              config.filter.min_spread = flt["min_spread"].as<double>();
-        if (flt["max_spread"])              config.filter.max_spread = flt["max_spread"].as<double>();
-        if (flt["min_price"])               config.filter.min_price = flt["min_price"].as<double>();
-        if (flt["max_price"])               config.filter.max_price = flt["max_price"].as<double>();
-        if (flt["skip_fractional_markets"]) config.filter.skip_fractional_markets = flt["skip_fractional_markets"].as<bool>();
-    }
-
     if (auto n = root["nba"]) {
         if (n["enabled"])                       config.nba.enabled = n["enabled"].as<bool>();
         if (n["min_edge_threshold"])            config.nba.min_edge_threshold = n["min_edge_threshold"].as<double>();
@@ -91,6 +66,31 @@ Config Config::load(const std::string& path) {
         if (n["max_position_per_game_dollars"]) config.nba.max_position_per_game_dollars = n["max_position_per_game_dollars"].as<double>();
         if (n["kelly_fraction"])                config.nba.kelly_fraction = n["kelly_fraction"].as<double>();
         if (n["scoreboard_poll_seconds"])       config.nba.scoreboard_poll_seconds = n["scoreboard_poll_seconds"].as<int>();
+        if (n["min_abs_score_diff"])            config.nba.min_abs_score_diff = n["min_abs_score_diff"].as<int>();
+        if (n["max_uncertain_wp"])              config.nba.max_uncertain_wp = n["max_uncertain_wp"].as<double>();
+        if (n["min_strong_wp"])                 config.nba.min_strong_wp = n["min_strong_wp"].as<double>();
+        if (n["min_lot_size"])                  config.nba.min_lot_size = n["min_lot_size"].as<int>();
+        if (n["quote_jitter_pct"])              config.nba.quote_jitter_pct = n["quote_jitter_pct"].as<double>();
+        if (n["min_clv_edge"])                  config.nba.min_clv_edge = n["min_clv_edge"].as<double>();
+        if (n["min_market_volume"])             config.nba.min_market_volume = n["min_market_volume"].as<int>();
+        if (n["default_pregame_spread"])        config.nba.default_pregame_spread = n["default_pregame_spread"].as<double>();
+    }
+
+    if (auto r = root["resolution_lag"]) {
+        if (r["enabled"])                       config.resolution_lag.enabled = r["enabled"].as<bool>();
+        if (r["cutoff_clock_seconds"])          config.resolution_lag.cutoff_clock_seconds = r["cutoff_clock_seconds"].as<int>();
+        if (r["cutoff_lead_points"])            config.resolution_lag.cutoff_lead_points = r["cutoff_lead_points"].as<int>();
+        if (r["include_status_final"])          config.resolution_lag.include_status_final = r["include_status_final"].as<bool>();
+        if (r["min_entry_price"])               config.resolution_lag.min_entry_price = r["min_entry_price"].as<double>();
+        if (r["max_entry_price"])               config.resolution_lag.max_entry_price = r["max_entry_price"].as<double>();
+        if (r["max_position_per_game_dollars"]) config.resolution_lag.max_position_per_game_dollars = r["max_position_per_game_dollars"].as<double>();
+        if (r["min_lot_size"])                  config.resolution_lag.min_lot_size = r["min_lot_size"].as<int>();
+        if (r["min_market_volume"])             config.resolution_lag.min_market_volume = r["min_market_volume"].as<int>();
+    }
+
+    if (auto f = root["feeds"]) {
+        if (f["oddsapi_key"])                   config.feeds.oddsapi_key = f["oddsapi_key"].as<std::string>();
+        if (f["espn_injury_url"])               config.feeds.espn_injury_url = f["espn_injury_url"].as<std::string>();
     }
 
     if (auto a = root["alerts"]) {

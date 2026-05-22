@@ -83,9 +83,42 @@ public:
     // form is fine when you're fetching a known-bounded batch.
     std::vector<KalshiMarket> get_markets_paginated(const std::string& status = "open",
                                                      int page_limit = 1000,
-                                                     int max_pages = 20);
+                                                     int max_pages = 20,
+                                                     const std::string& series_ticker = "");
     std::optional<KalshiMarket> get_market(const std::string& ticker);
     KalshiOrderbook get_orderbook(const std::string& ticker);
+
+    // Historical candlestick (OHLC) data for a market. Used by the backtest
+    // replay engine — without full book history (Kalshi doesn't expose tick
+    // data publicly), candlesticks are the highest-resolution free proxy.
+    //
+    // Endpoint: GET /series/{series}/markets/{ticker}/candlesticks
+    // period_interval: 1 = 1-minute bars, 60 = 1-hour, 1440 = 1-day.
+    // start_ts / end_ts are unix epoch SECONDS (NOT ms).
+    struct KalshiCandle {
+        int64_t end_period_ts = 0;   // unix epoch seconds (close of bar)
+        int open_interest = 0;
+        int volume = 0;
+        // Last-trade-price OHLC across the bar. Zero if no trades in the
+        // bar (Kalshi reports null/missing — we map to 0).
+        double price_open = 0.0;
+        double price_high = 0.0;
+        double price_low = 0.0;
+        double price_close = 0.0;
+        // YES-side bid/ask OHLC across the bar. Useful for replay since
+        // strategy signals depend on bid/ask, not just last trade.
+        double yes_bid_close = 0.0;
+        double yes_ask_close = 0.0;
+    };
+    std::vector<KalshiCandle> get_candlesticks(const std::string& series_ticker,
+                                                const std::string& ticker,
+                                                int64_t start_ts_sec,
+                                                int64_t end_ts_sec,
+                                                int period_interval_min = 1);
+
+    // Pure JSON parser for the candlestick response. Exposed for unit tests.
+    static std::vector<KalshiCandle> parse_candlesticks(
+        const nlohmann::json& body);
 
     // Batch orderbook fetch (GET /markets/orderbooks, landed Mar 30 2026).
     // Returns a map keyed by ticker — entries absent from the map were not
@@ -165,6 +198,23 @@ public:
                         bool post_only = true);
     bool cancel_order(const OrderId& order_id);
 
+    // Amend a resting order's price and/or quantity in place.
+    // POST /portfolio/orders/{order_id}/amend
+    //
+    // Wire format mirrors place_order: `yes_price_dollars` as 4-decimal
+    // string, `count_fp` as 2-decimal string. (An earlier version sent an
+    // int-cents `yes_price`; that was wrong and was fixed 2026-05-20.)
+    //
+    // Returns true on success. Queue-position semantics per Kalshi docs are
+    // ambiguous: increasing count at the same price forfeits queue, but the
+    // price-change case is undocumented. Empirical assumption (consistent
+    // with most CDA exchanges): amend-down-price keeps queue, amend-up-price
+    // moves you to the back. Verify in shadow before relying on it.
+    //
+    // Pass a non-positive value to leave that field unchanged.
+    bool amend_order(const OrderId& order_id, double new_price = -1.0,
+                      int new_quantity = -1);
+
     // Batch cancel: DELETE /portfolio/orders/batched. Per Kalshi's rate
     // limiting, each cancel counts as 0.2 write transactions vs 1.0 for
     // serial cancels — ~5x cheaper. Transparently splits into <=20-id
@@ -205,6 +255,15 @@ public:
         const std::vector<std::string>& prefixes,
         const std::vector<std::string>& excludes = {},
         int page_limit = 1000);
+
+    // Refresh the cache by Kalshi series ticker, which is a server-side filter.
+    // ~1000x cheaper than refresh_markets_by_ticker_prefix on prod, where the
+    // full open-markets catalog runs ~300k entries and series like KXNBAGAME
+    // sort beyond any reasonable page cap. Use this when you know the exact
+    // series (e.g. "KXNBAGAME"); use the prefix variant only for fuzzy lookups
+    // that need to walk multiple series at once.
+    void refresh_markets_by_series(const std::string& series_ticker,
+                                    int page_limit = 1000);
     const std::unordered_map<std::string, KalshiMarket>& cached_markets() const { return market_cache_; }
 
     // Parse Kalshi JSON responses

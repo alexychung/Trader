@@ -2,6 +2,8 @@
 
 #include "core/types.hpp"
 #include "exchange/kalshi/rest_client.hpp"
+#include "feeds/injury_news_feed.hpp"
+#include "feeds/sharp_book_provider.hpp"
 #include "risk/risk_manager.hpp"
 #include "strategy/kalshi/calibration.hpp"
 #include "strategy/nba/nba_score_feed.hpp"
@@ -28,11 +30,16 @@ using ::trader::kalshi::KalshiMarket;
 //   during the 3rd or 4th quarter, fire a maker order on the cheaper side.
 //
 // Assumptions / explicit limitations:
-//   - Kalshi convention: YES side = HOME team (per Kalshi `yes_sub_title`
-//     observed convention; we do not yet read that field to verify per-market).
-//     If Kalshi ever lists a KXNBAGAME with YES = away, this strategy will
-//     systematically take the wrong side. The strategy logs the ticker +
-//     team mapping at every signal so a human review can catch it.
+//   - Kalshi lists each game as TWO binary markets:
+//       KXNBAGAME-{YYmonDDawayhome}-{HOME}  (YES = home team)
+//       KXNBAGAME-{YYmonDDawayhome}-{AWAY}  (YES = away team)
+//     The strategy matches the event prefix case-insensitively, parses the
+//     contract-side suffix to determine which team is YES, and inverts the
+//     model probability when YES = away. Each signal logs the ticker, the
+//     yes-side mapping, and the fair/mid prices for audit.
+//   - Only BUY YES signals are emitted. Each game has two opposing tickers,
+//     so the side with positive edge naturally fires; buying NO on the
+//     companion ticker would just hedge ourselves and pay 2× maker fees.
 //   - WP is computed from regulation-clock only; OT markets stop trading.
 //   - Strategy assumes equal-strength teams. No pre-game-spread adjustment in
 //     v1; that's a v2 calibration item.
@@ -45,11 +52,18 @@ using ::trader::kalshi::KalshiMarket;
 class NbaStrategy {
 public:
     struct Config {
-        // Minimum |our_WP − market_mid| to fire a signal. 4¢ default is a
-        // best-guess starting point — sports books are tighter than weather
-        // but you also pay fees on every contract (~0.4¢/side at P=0.5).
-        // Tune via calibration over the first ~2 weeks of paper trading.
-        double min_edge_threshold = 0.04;
+        // Minimum edge AFTER costs to fire a signal. Formula:
+        //   edge_after_costs = fair_yes − target_price − fee_per_contract
+        // where target_price = yes_ask (worst case) and the fee is the
+        // Kalshi maker fee amortized across min_lot_size contracts.
+        //
+        // This is the post-2026-05-20 semantic — the previous default of
+        // 0.04 measured `fair − mid`, which silently allowed negative
+        // expected-value trades whenever the bid/ask spread was wide. The
+        // new default 0.02 means "at least 2¢ of post-fee EV per contract"
+        // and is comparable to the old gate AFTER accounting for half-
+        // spread + fee on a typical KXNBAGAME book.
+        double min_edge_threshold = 0.02;
 
         // Maximum book spread to accept. Wider than this, market is too
         // illiquid to trust the mid.
@@ -69,12 +83,78 @@ public:
         // How often to refresh scoreboard from cdn.nba.com. The CDN updates
         // its JSON ~every 3-5s, so 5s polling is more than enough.
         std::chrono::seconds scoreboard_poll_interval{5};
+
+        // High-confidence gate (improved-directional v2, added 2026-05-19).
+        // Skip the signal unless BOTH:
+        //   |home_lead| >= min_abs_score_diff   AND
+        //   home_wp <= max_uncertain_wp OR home_wp >= min_strong_wp
+        // The arcsine model is most accurate when one side clearly leads; in
+        // tight games it produces noisy probabilities near 0.5 that get picked
+        // off by faster MMs with arena feeds.
+        int min_abs_score_diff = 8;
+        double max_uncertain_wp = 0.30;
+        double min_strong_wp = 0.70;
+
+        // Lot-size optimizer (#7, 2026-05-20). Kalshi maker fee is
+        //   ceil(0.0175 × contracts × P × (1-P))  (CEIL to whole cent)
+        // so a 1-contract fill ALWAYS pays at least 1¢ regardless of price.
+        // At P=0.5 the raw fee is 0.44¢/contract; ceiling means 1-lot pays
+        // 2.3× the per-contract rate of a 10-lot. We refuse to size below
+        // min_lot_size to amortize the ceiling.
+        int min_lot_size = 5;
+
+        // Quote-timing jitter (#9, 2026-05-20). Per arXiv:2510.27334, RL MMs
+        // leak behavioral patterns to faster counterparties via deterministic
+        // refresh timing. We add ± this fraction of randomness to the
+        // scoreboard poll interval so our quote-update pattern can't be
+        // pattern-matched by HFT. 0.0 disables; 0.20 = ±20% jitter.
+        double quote_jitter_pct = 0.20;
+
+        // Pinnacle CLV gate (#1, 2026-05-20). When a sharp-book provider is
+        // wired in (see ISharpBookProvider), this is the minimum deviation
+        // between the Kalshi market mid and the sharp fair (with Kalshi
+        // CHEAPER than sharp on the side we are buying) required to fire a
+        // signal. 0.02 = 2¢. Strategy skips the gate when no sharp_fair is
+        // available (Null provider returns nullopt).
+        double min_clv_edge = 0.02;
+
+        // Volume sanity gate. KXNBAGAME books with low total volume are
+        // typically stale at signal time — the model probability has moved
+        // but no counterparty has refreshed the quote. Default 100 contracts
+        // (~$50 in two-way notional) rejects morning-of-game placeholders
+        // and obvious dead markets.
+        int min_market_volume = 100;
+
+        // Pregame point spread default applied to the arcsine model (see
+        // win_probability.hpp limitation: "Apply an offset for known spread
+        // before calling"). Sign convention: positive means HOME is favored
+        // by that many points pregame. Formula:
+        //   effective_lead = current_lead - spread * (time_elapsed / 2880)
+        // Per-game spreads override this default via
+        // NbaGameSnapshot.pregame_spread (set by a feed when available).
+        // Zero matches the original equal-strength-teams assumption.
+        double default_pregame_spread = 0.0;
     };
 
     NbaStrategy(RiskManager& risk_manager,
                 CalibrationLogger& calibration,
                 NbaScoreFeed& score_feed,
                 Config cfg = {});
+
+    // Optional sharp-book provider for the CLV gate (#1). If not set, the
+    // strategy falls back to arcsine-only fair value (no external check).
+    // Setter rather than ctor arg to keep existing wiring backwards-compat.
+    void set_sharp_book_provider(::trader::feeds::ISharpBookProvider* p) {
+        sharp_book_ = p;
+    }
+
+    // Optional injury kill switch (#3). When set and the feed flags either
+    // team in a game as frozen, the strategy skips that game entirely. The
+    // caller is responsible for cancelling existing orders separately
+    // (typically via KillSwitch or OrderManager).
+    void set_injury_feed(::trader::feeds::IInjuryNewsFeed* f) {
+        injury_feed_ = f;
+    }
 
     // Update Kalshi-side market state. Called by main loop on each tick
     // with the full filtered KXNBAGAME-* market snapshot.
@@ -101,6 +181,13 @@ public:
     std::size_t games_tracked() const { return last_snapshots_.size(); }
     std::size_t live_games() const;
 
+    // Snapshot accessor — exposed so sibling strategies (e.g. ResolutionLag)
+    // can reuse the same cdn.nba.com scoreboard fetch instead of duplicating
+    // the HTTP call. Mutates after every generate_signals() / refresh.
+    const std::vector<NbaGameSnapshot>& last_snapshots() const {
+        return last_snapshots_;
+    }
+
     const Config& config() const { return cfg_; }
 
 private:
@@ -116,6 +203,12 @@ private:
 
     int signals_generated_ = 0;
     int trades_executed_ = 0;
+
+    // Optional CLV gate. nullptr = no external sanity check (default).
+    ::trader::feeds::ISharpBookProvider* sharp_book_ = nullptr;
+
+    // Optional injury kill switch. nullptr = never freezes (default).
+    ::trader::feeds::IInjuryNewsFeed* injury_feed_ = nullptr;
 };
 
 } // namespace trader::nba
