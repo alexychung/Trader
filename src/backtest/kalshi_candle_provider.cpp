@@ -221,10 +221,20 @@ bool KalshiCandlePriceProvider::prefetch_game(
         } else {
             ++cache_misses_;
             candles = fetch_uncached(ticker_upper, start_ts, end_ts);
-            if (!candles.empty()) {
-                save_to_cache(ticker_upper, candles);
-            } else {
+            if (candles.empty()) {
                 ++empty_fetches_;
+            } else if (is_all_zero_response(candles)) {
+                // hotfix-bugs #5: don't cache responses where every bar
+                // is zero quotes + zero volume. Common for fresh playoff
+                // markets on day-of fetch — Kalshi returns the bar
+                // window but no quotes have crossed yet. Caching the
+                // zeros would make every re-run see zeros forever.
+                ++empty_fetches_;
+                spdlog::debug("Candle response for {} is all-zeros — not "
+                              "caching so a later re-run can re-fetch.",
+                              ticker_upper);
+            } else {
+                save_to_cache(ticker_upper, candles);
             }
         }
         // Sort by end_period_ts for binary-search lookup later.
@@ -239,6 +249,16 @@ bool KalshiCandlePriceProvider::prefetch_game(
         by_ticker_[ticker_lower] = std::move(candles);
     }
     return any_data;
+}
+
+bool KalshiCandlePriceProvider::is_all_zero_response(
+    const std::vector<KalshiCandle>& candles) {
+    for (const auto& c : candles) {
+        if (c.yes_bid_close > 0.0) return false;
+        if (c.yes_ask_close > 0.0) return false;
+        if (c.volume > 0) return false;
+    }
+    return true;
 }
 
 std::optional<IKalshiPriceProvider::Quote>

@@ -103,3 +103,36 @@ TEST(KalshiCandleSelectQuote, FiltersInvertedSpread) {
     };
     EXPECT_FALSE(KalshiCandlePriceProvider::select_quote(candles, 500).has_value());
 }
+
+// hotfix-bugs task #5: don't cache "all zeros" responses, otherwise
+// re-runs read stale zeros forever after Kalshi populates the data.
+TEST(KalshiCandleIsAllZeroResponse, EmptyVectorIsAllZero) {
+    EXPECT_TRUE(KalshiCandlePriceProvider::is_all_zero_response({}));
+}
+
+TEST(KalshiCandleIsAllZeroResponse, AllZeroBarsAreAllZero) {
+    std::vector<KalshiCandlePriceProvider::KalshiCandle> candles = {
+        make_candle(1000, 0.0, 0.0, 0),
+        make_candle(1060, 0.0, 0.0, 0),
+        make_candle(1120, 0.0, 0.0, 0),
+    };
+    EXPECT_TRUE(KalshiCandlePriceProvider::is_all_zero_response(candles));
+}
+
+TEST(KalshiCandleIsAllZeroResponse, OneNonZeroBarIsNotAllZero) {
+    std::vector<KalshiCandlePriceProvider::KalshiCandle> candles = {
+        make_candle(1000, 0.0, 0.0, 0),
+        make_candle(1060, 0.50, 0.52, 100),  // one bar with quotes
+        make_candle(1120, 0.0, 0.0, 0),
+    };
+    EXPECT_FALSE(KalshiCandlePriceProvider::is_all_zero_response(candles));
+}
+
+TEST(KalshiCandleIsAllZeroResponse, VolumeOnlyCountsAsActivity) {
+    // No quote close but volume > 0 means SOME trade happened in the bar.
+    // Don't filter; that's real activity.
+    std::vector<KalshiCandlePriceProvider::KalshiCandle> candles = {
+        make_candle(1000, 0.0, 0.0, 50),
+    };
+    EXPECT_FALSE(KalshiCandlePriceProvider::is_all_zero_response(candles));
+}

@@ -76,6 +76,15 @@ public:
     static std::optional<Quote> select_quote(
         const std::vector<KalshiCandle>& candles, int64_t wall_clock_ts_sec);
 
+    // True if every candle in the response has zero bid AND zero ask AND
+    // zero volume. Kalshi returns full bar windows even for markets that
+    // had no quote activity (e.g., pre-tipoff playoff games on day-of
+    // first fetch), and we don't want to cache these — re-running the
+    // same backtest after Kalshi populates the data would otherwise read
+    // stale zeros from disk forever. See hotfix-bugs #5.
+    static bool is_all_zero_response(
+        const std::vector<KalshiCandle>& candles);
+
 private:
 
     // Resolve KXNBAGAME series ticker — the Kalshi candlestick endpoint
