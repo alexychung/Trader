@@ -105,3 +105,34 @@ TEST_F(ConfigTest, DefaultsWhenSectionMissing) {
 TEST_F(ConfigTest, ThrowsOnMissingFile) {
     EXPECT_THROW(Config::load("nonexistent_file.yaml"), std::runtime_error);
 }
+
+// hotfix-bugs task #6: quote_jitter_pct outside [0, 0.9] can produce
+// non-positive effective_interval and break the poll rate-limiter. Clamp
+// at load time so a misconfigured value can't silently degrade behavior.
+TEST_F(ConfigTest, ClampsExcessiveQuoteJitterPct) {
+    std::ofstream out("test_jitter_high.yaml");
+    out << "nba:\n  quote_jitter_pct: 5.0\n";
+    out.close();
+    auto config = Config::load("test_jitter_high.yaml");
+    EXPECT_LE(config.nba.quote_jitter_pct, 0.9);
+    EXPECT_GE(config.nba.quote_jitter_pct, 0.0);
+    std::filesystem::remove("test_jitter_high.yaml");
+}
+
+TEST_F(ConfigTest, ClampsNegativeQuoteJitterPct) {
+    std::ofstream out("test_jitter_neg.yaml");
+    out << "nba:\n  quote_jitter_pct: -0.5\n";
+    out.close();
+    auto config = Config::load("test_jitter_neg.yaml");
+    EXPECT_GE(config.nba.quote_jitter_pct, 0.0);
+    std::filesystem::remove("test_jitter_neg.yaml");
+}
+
+TEST_F(ConfigTest, PreservesValidQuoteJitterPct) {
+    std::ofstream out("test_jitter_ok.yaml");
+    out << "nba:\n  quote_jitter_pct: 0.25\n";
+    out.close();
+    auto config = Config::load("test_jitter_ok.yaml");
+    EXPECT_DOUBLE_EQ(config.nba.quote_jitter_pct, 0.25);
+    std::filesystem::remove("test_jitter_ok.yaml");
+}

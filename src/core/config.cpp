@@ -1,6 +1,8 @@
 #include "core/config.hpp"
+#include <algorithm>
 #include <fstream>
 #include <stdexcept>
+#include <spdlog/spdlog.h>
 
 namespace trader {
 
@@ -71,7 +73,19 @@ Config Config::load(const std::string& path) {
         if (n["max_uncertain_wp"])              config.nba.max_uncertain_wp = n["max_uncertain_wp"].as<double>();
         if (n["min_strong_wp"])                 config.nba.min_strong_wp = n["min_strong_wp"].as<double>();
         if (n["min_lot_size"])                  config.nba.min_lot_size = n["min_lot_size"].as<int>();
-        if (n["quote_jitter_pct"])              config.nba.quote_jitter_pct = n["quote_jitter_pct"].as<double>();
+        if (n["quote_jitter_pct"]) {
+            double raw = n["quote_jitter_pct"].as<double>();
+            // Clamp to [0, 0.9]: above 0.9 the random multiplier (1 + U(-j,
+            // +j)) can land at <= 0 and effective_interval would be zero
+            // or negative — refresh_scoreboard_if_due would either fire
+            // every tick or never fire. See hotfix-bugs #6.
+            double clamped = std::max(0.0, std::min(0.9, raw));
+            if (clamped != raw) {
+                spdlog::warn("config: nba.quote_jitter_pct {} clamped to "
+                             "{} (valid range [0, 0.9])", raw, clamped);
+            }
+            config.nba.quote_jitter_pct = clamped;
+        }
         if (n["min_clv_edge"])                  config.nba.min_clv_edge = n["min_clv_edge"].as<double>();
         if (n["min_market_volume"])             config.nba.min_market_volume = n["min_market_volume"].as<int>();
         if (n["default_pregame_spread"])        config.nba.default_pregame_spread = n["default_pregame_spread"].as<double>();
