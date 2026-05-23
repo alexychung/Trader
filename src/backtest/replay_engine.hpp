@@ -165,4 +165,21 @@ struct BacktestSummary {
 
 BacktestSummary aggregate(const std::vector<GameReplayResult>& per_game);
 
+// Approximate wall-clock timestamp (unix epoch seconds) for a PBP event.
+// Used by the replay engine to query IKalshiPriceProvider::get_quote at
+// the right historical moment. Exposed for unit testing — the candle
+// provider's prefetch window must align with the range this function
+// produces, otherwise lower_bound() always returns the first candle and
+// the strategy sees a static price for the whole game.
+int64_t pbp_wall_clock_ts_sec(const PbpGameSummary& g, const PbpEvent& e);
+
+// Bounds the candle provider must cover for the wall_clock range above
+// to fall inside fetched candles. Exposed alongside pbp_wall_clock so
+// alignment tests can assert the invariant directly.
+struct CandleWindowBounds {
+    int64_t start_ts_sec;
+    int64_t end_ts_sec;
+};
+CandleWindowBounds candle_window_for(const std::string& game_date_iso);
+
 } // namespace trader::backtest

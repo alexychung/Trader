@@ -117,13 +117,13 @@ Switching to real prices uncovered a silent parse bug: Kalshi's actual response 
 | Metric | Value |
 |---|---|
 | Games replayed | 162 (out of 173 attempted; 11 had no Kalshi candle data) |
-| Signals fired | 129 (~80% of games) |
-| Win rate | **68.2%** (88W / 41L) |
-| Brier score | **0.1055** (random = 0.25, half of random ≈ "well calibrated") |
-| Total PnL | **+$591.37** |
-| Total fees | $10.79 |
-| Max drawdown | $19.35 |
-| Avg PnL per game | $3.65 |
+| Signals fired | 165 (~1.0 per game) |
+| Win rate | **63.6%** (105W / 60L) |
+| Brier score | **0.1013** (random = 0.25, half of random ≈ "well calibrated") |
+| Total PnL | **+$584.15** |
+| Total fees | $12.85 |
+| Max drawdown | $36.21 |
+| Avg PnL per game | $3.61 |
 
 This is real edge against real historical Kalshi books. The Brier score (0.1055) tells you the model's probability calls are well-calibrated against actual outcomes for the bets it chose to fire — the trades aren't winning by luck.
 
@@ -133,6 +133,8 @@ Two filters did meaningful cleanup work on the way to this number:
 2. **Strategy `max_edge_threshold = 0.50` sanity gate** (`nba_strategy.cpp`) — refuses to fire when `|fair − mid| > 0.50`. Even when a candle bar shows a tight `{0.04, 0.05}` quote on a close one-possession game, the implied 4% win probability is data garbage, not a 70¢ free trade. Same gate also protects against real-life cases where the sharps know something we don't.
 
 Pre-filter Apr→May numbers for comparison: 138 signals, 69.6% win rate, +$1059 PnL, Brier 0.1157. Stripping the 9 phantom signals lost some apparent wins but improved Brier — i.e., the gate kept the well-calibrated trades and dropped the noisy ones.
+
+A separate fix on 2026-05-23 corrected a wall-clock-vs-candle-window alignment bug (`pbp_wall_clock_ts_sec` was anchored at midnight UTC; the candle provider's fetch window started at 22:00 UTC — every `get_quote` returned `candles.begin()` instead of the bar covering the in-game tick). With time-varying candle data actually visible to the strategy, signal count jumped from 129 → 165, Brier improved 0.1055 → 0.1013, and drawdown rose to $36.21 reflecting genuine intra-game variance. The PnL number is largely unchanged (~$590) but it now means something materially different: it measures edge against the *book at game-time*, not the *opening line*.
 
 Caveats:
 - 1-minute bar resolution; sub-minute moves invisible.

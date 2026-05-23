@@ -165,11 +165,22 @@ std::vector<::trader::kalshi::KalshiMarket> build_markets(
     return out;
 }
 
-// Approximate wall-clock for a PBP event. NBA games are ~2.5h for ~48
-// minutes of game time; we use a flat 3x multiplier on game-clock-elapsed
-// for the regulation portion. Period breaks and timeouts are folded in
-// implicitly. Tipoff anchored at 19:00 local (~midnight UTC). Used only
-// for IKalshiPriceProvider lookup; the synthetic provider ignores it.
+} // namespace
+
+// Approximate wall-clock for a PBP event. NBA games span ~2.5h of wall
+// time for ~48 minutes of game time, so we use a flat 3x multiplier on
+// game-clock-elapsed for the regulation portion. Period breaks and
+// timeouts are folded in implicitly.
+//
+// Anchor: 23:00 UTC of game_date_iso = 7pm EDT, the most common NBA
+// tipoff slot for east-coast prime time. The full range produced by
+// this function is [23:00 UTC, ~01:24 UTC next day], which sits inside
+// the candle-provider's fetch window of [22:00, 06:00 next day]. The
+// earlier midnight-UTC anchor used through 2026-05-22 produced
+// timestamps a full 19h before the first candle bar, causing
+// IKalshiPriceProvider::get_quote to fall back to candles.begin()
+// (pre-tipoff bar) on every call and silently producing a static-price
+// backtest. See hotfix-bugs task #1.
 int64_t pbp_wall_clock_ts_sec(const PbpGameSummary& g, const PbpEvent& e) {
     int yy = 0, mm = 0, dd = 0;
     if (g.game_date_iso.size() >= 10) {
@@ -183,7 +194,7 @@ int64_t pbp_wall_clock_ts_sec(const PbpGameSummary& g, const PbpEvent& e) {
     tm.tm_year = yy - 1900;
     tm.tm_mon = mm - 1;
     tm.tm_mday = dd;
-    tm.tm_hour = 0;    // assume midnight UTC tipoff (close enough for cand lookup)
+    tm.tm_hour = 23;   // ~7pm EDT tipoff anchor
     int64_t tipoff_utc = static_cast<int64_t>(
 #ifdef _WIN32
         _mkgmtime(&tm)
@@ -197,7 +208,28 @@ int64_t pbp_wall_clock_ts_sec(const PbpGameSummary& g, const PbpEvent& e) {
     return tipoff_utc + 3 * game_elapsed;  // 3x stretch for breaks
 }
 
-} // namespace
+CandleWindowBounds candle_window_for(const std::string& game_date_iso) {
+    int yy = 0, mm = 0, dd = 0;
+    if (game_date_iso.size() >= 10) {
+        try {
+            yy = std::stoi(game_date_iso.substr(0, 4));
+            mm = std::stoi(game_date_iso.substr(5, 2));
+            dd = std::stoi(game_date_iso.substr(8, 2));
+        } catch (...) { return {0, 0}; }
+    }
+    std::tm tm{};
+    tm.tm_year = yy - 1900;
+    tm.tm_mon = mm - 1;
+    tm.tm_mday = dd;
+    int64_t day_start = static_cast<int64_t>(
+#ifdef _WIN32
+        _mkgmtime(&tm)
+#else
+        timegm(&tm)
+#endif
+        );
+    return {day_start + 22 * 3600, day_start + 30 * 3600};
+}
 
 GameReplayResult BacktestReplay::replay_game(
     const PbpGameSummary& summary,
