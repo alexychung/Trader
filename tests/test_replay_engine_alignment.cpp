@@ -2,11 +2,14 @@
 
 #include "backtest/replay_engine.hpp"
 
+using trader::backtest::BacktestReplay;
 using trader::backtest::candle_window_for;
 using trader::backtest::CandleWindowBounds;
+using trader::backtest::IKalshiPriceProvider;
 using trader::backtest::pbp_wall_clock_ts_sec;
 using trader::backtest::PbpEvent;
 using trader::backtest::PbpGameSummary;
+using trader::backtest::ReplayConfig;
 
 namespace {
 
@@ -87,4 +90,105 @@ TEST(ReplayAlignment, WallClockMonotonicAcrossGameProgress) {
     auto end_ts = pbp_wall_clock_ts_sec(game, make_event(0));
     EXPECT_LT(tip_ts, mid_ts);
     EXPECT_LT(mid_ts, end_ts);
+}
+
+// =========================================================================
+// hotfix-bugs task #3: ResolutionLag must fire on FINAL status during
+// backtest. The replay engine used to emit only game_status=2 (live)
+// snapshots, so reslag's is_final() branch never triggered and the
+// strategy's most reliable setup (buy YES at $0.94-0.99 on settled book)
+// was untested.
+// =========================================================================
+
+namespace {
+
+// Provider that returns fixed YES quotes — winning side near settle
+// price, losing side near zero — so ResolutionLag is in its entry
+// window without any synthetic-noise variance.
+class FixedPriceProvider : public IKalshiPriceProvider {
+public:
+    FixedPriceProvider(const std::string& winning_tricode_upper,
+                        double winning_bid, double winning_ask)
+        : winning_upper_(winning_tricode_upper),
+          winning_bid_(winning_bid), winning_ask_(winning_ask) {}
+    std::optional<Quote> get_quote(const std::string& ticker,
+                                    int64_t /*ts*/) override {
+        // Ticker suffix tells us which side; if winning side, return the
+        // ~settle price; otherwise return near-zero.
+        std::string upper = ticker;
+        for (auto& c : upper) c = static_cast<char>(std::toupper(c));
+        bool is_winning = upper.size() >= winning_upper_.size() &&
+            upper.compare(upper.size() - winning_upper_.size(),
+                           winning_upper_.size(), winning_upper_) == 0;
+        Quote q;
+        if (is_winning) {
+            q.yes_bid = winning_bid_;
+            q.yes_ask = winning_ask_;
+        } else {
+            q.yes_bid = 1.0 - winning_ask_;
+            q.yes_ask = 1.0 - winning_bid_;
+        }
+        q.volume = 500;
+        return q;
+    }
+
+private:
+    std::string winning_upper_;
+    double winning_bid_;
+    double winning_ask_;
+};
+
+PbpEvent make_pbp_event(int regulation_seconds_remaining,
+                         int period, int home_score, int away_score) {
+    PbpEvent e;
+    e.regulation_seconds_remaining = regulation_seconds_remaining;
+    e.period = period;
+    e.clock_seconds = std::max(0, regulation_seconds_remaining -
+                                   (4 - period) * 720);
+    e.score_home = home_score;
+    e.score_away = away_score;
+    return e;
+}
+
+} // namespace
+
+TEST(ReplayAlignment, ResolutionLagFiresOnFinalSnapshot) {
+    // Build a CLOSE game so the Q4-blowout branch never triggers:
+    //   regulation seconds = [2880 .. 0], home leads by 5 throughout.
+    // Reslag's only way to fire here is via game_status=3 (final) emitted
+    // by the replay engine after the PBP event loop.
+    PbpGameSummary g;
+    g.game_id = "0022500001";
+    g.game_date_iso = "2026-04-01";
+    g.home_tricode = "OKC";
+    g.away_tricode = "SAS";
+    g.home_final_score = 110;
+    g.away_final_score = 105;
+    g.game_status = 3;
+
+    std::vector<PbpEvent> events;
+    events.push_back(make_pbp_event(2880, 1, 0, 0));       // tipoff
+    events.push_back(make_pbp_event(1440, 3, 55, 50));     // halftime-ish
+    events.push_back(make_pbp_event(120, 4, 105, 100));    // close Q4 (lead < 15)
+    events.push_back(make_pbp_event(0, 4, 110, 105));      // final buzzer
+
+    ReplayConfig cfg;
+    cfg.simulated_bankroll = 10000.0;
+    cfg.run_resolution_lag = true;
+    // Reslag entry window covers 0.95 → signal should fire on OKC ticker.
+    cfg.reslag.min_entry_price = 0.94;
+    cfg.reslag.max_entry_price = 0.99;
+    cfg.reslag.min_market_volume = 100;
+    cfg.reslag.min_lot_size = 5;
+    // Disable NbaStrategy to keep the test focused: an unreachable edge.
+    cfg.nba.min_edge_threshold = 1.0;
+
+    FixedPriceProvider provider("OKC", /*bid=*/0.94, /*ask=*/0.95);
+    BacktestReplay engine(cfg);
+    auto result = engine.replay_game(g, events, provider);
+
+    EXPECT_GE(result.signals_resolution_lag, 1)
+        << "ResolutionLag did not fire on game_status=3 snapshot — replay "
+        << "engine may not be emitting the final-status snapshot after the "
+        << "PBP event loop.";
 }

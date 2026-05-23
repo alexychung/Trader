@@ -307,32 +307,23 @@ GameReplayResult BacktestReplay::replay_game(
         risk_mgr.on_fill(s.ticker, s.contract_side, s.quantity, s.market_price);
     };
 
-    for (const auto& e : events) {
-        // Strategy ignores periods outside regulation; we still walk PBP
-        // events for state tracking even when no signal can fire.
-        auto snap = snapshot_from_pbp(summary, e, cfg_.pregame_spread);
-
-        // Tell the price provider what wp to price around. The synthetic
-        // provider needs this; real-candle providers can ignore it.
-        double home_wp = compute_home_wp(snap.home_lead(),
-                                          snap.regulation_seconds_remaining,
-                                          cfg_.pregame_spread);
+    auto run_tick = [&](const ::trader::nba::NbaGameSnapshot& snap,
+                         int64_t wall_ts,
+                         IKalshiPriceProvider& provider) {
         if (auto* synth = dynamic_cast<SyntheticKalshiPriceProvider*>(
-                &price_provider)) {
+                &provider)) {
+            const double home_wp = compute_home_wp(
+                snap.home_lead(), snap.regulation_seconds_remaining,
+                cfg_.pregame_spread);
             synth->set_home_wp(home_wp);
         }
-
-        // Build the per-side Kalshi markets for this tick.
-        int64_t wall_ts = pbp_wall_clock_ts_sec(summary, e);
-        auto markets = build_markets(summary, price_provider, wall_ts);
-
+        auto markets = build_markets(summary, provider, wall_ts);
         feed.snapshot = snap;
         feed.valid = true;
         nba_strat.set_markets(markets);
         if (cfg_.run_resolution_lag) {
             reslag.set_markets(markets);
         }
-
         auto sigs = nba_strat.generate_signals();
         result.signals_arcsine += static_cast<int>(sigs.size());
         for (const auto& s : sigs) record_fill(s, "arcsine");
@@ -343,11 +334,39 @@ GameReplayResult BacktestReplay::replay_game(
             result.signals_resolution_lag += static_cast<int>(rs.size());
             for (const auto& s : rs) record_fill(s, "resolution-lag");
         }
+    };
 
-        // Update game state (last fill's home_lead) — used for the
-        // settlement decision via the final-event check below.
-        // Note: PbpEvent already carries score state, so the last event
-        // ends the loop with a fresh score.
+    for (const auto& e : events) {
+        // Strategy ignores periods outside regulation; we still walk PBP
+        // events for state tracking even when no signal can fire.
+        auto snap = snapshot_from_pbp(summary, e, cfg_.pregame_spread);
+        int64_t wall_ts = pbp_wall_clock_ts_sec(summary, e);
+        run_tick(snap, wall_ts, price_provider);
+    }
+
+    // Post-game FINAL emit (hotfix-bugs #3). The PBP event loop only
+    // produces game_status=2 snapshots; ResolutionLag's `is_final()`
+    // branch (the "buy YES at 0.94-0.99 on the settled book" setup —
+    // the more reliable of the two reslag triggers per research) needs
+    // a game_status=3 snapshot. Synthesize one here at clock=0 with
+    // the actual final score so the strategy sees the post-game window.
+    if (!events.empty()) {
+        ::trader::nba::NbaGameSnapshot final_snap;
+        final_snap.valid = true;
+        final_snap.game_id = summary.game_id;
+        final_snap.game_status = 3;            // ← is_final() trigger
+        final_snap.game_date_iso = summary.game_date_iso;
+        final_snap.period = 4;
+        final_snap.game_clock_seconds = 0;
+        final_snap.regulation_seconds_remaining = 0;
+        final_snap.home_tricode = summary.home_tricode;
+        final_snap.away_tricode = summary.away_tricode;
+        final_snap.home_score = summary.home_final_score;
+        final_snap.away_score = summary.away_final_score;
+        final_snap.pregame_spread = cfg_.pregame_spread;
+        const PbpEvent& last = events.back();
+        int64_t final_ts = pbp_wall_clock_ts_sec(summary, last);
+        run_tick(final_snap, final_ts, price_provider);
     }
 
     // Settlement: each YES contract pays $1 if held side wins, else $0.

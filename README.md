@@ -117,13 +117,12 @@ Switching to real prices uncovered a silent parse bug: Kalshi's actual response 
 | Metric | Value |
 |---|---|
 | Games replayed | 162 (out of 173 attempted; 11 had no Kalshi candle data) |
-| Signals fired | 165 (~1.0 per game) |
-| Win rate | **63.6%** (105W / 60L) |
-| Brier score | **0.1013** (random = 0.25, half of random ≈ "well calibrated") |
-| Total PnL | **+$584.15** |
-| Total fees | $12.85 |
-| Max drawdown | $36.21 |
-| Avg PnL per game | $3.61 |
+| Signals fired | 167 (~1.0 per game) |
+| Win rate | **64.1%** (107W / 60L) |
+| Brier score | **0.1001** (random = 0.25, half of random ≈ "well calibrated") |
+| Total PnL | **+$585.66** |
+| Max drawdown | $35.19 |
+| Avg PnL per game | $3.62 |
 
 This is real edge against real historical Kalshi books. The Brier score (0.1055) tells you the model's probability calls are well-calibrated against actual outcomes for the bets it chose to fire — the trades aren't winning by luck.
 
