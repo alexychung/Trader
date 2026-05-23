@@ -55,18 +55,33 @@ std::string read_file(const std::string& path) {
     return ss.str();
 }
 
+// Atomic write with explicit failure logging. On Windows, rename fails
+// if the destination exists, so we fall back to remove + retry. Without
+// the warn on the retry failure (the original implementation), a
+// Windows file-lock during the retry would silently delete the cache
+// file and leave only the orphan .tmp — the user would think the cache
+// was never written and waste an API round-trip on the next run.
 void write_file_atomic(const std::string& path, const std::string& content) {
     const std::string tmp = path + ".tmp";
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) return;
+        if (!f) {
+            spdlog::warn("write_file_atomic: could not open {} for write", tmp);
+            return;
+        }
         f.write(content.data(), static_cast<std::streamsize>(content.size()));
     }
     std::error_code ec;
     std::filesystem::rename(tmp, path, ec);
     if (ec) {
-        std::filesystem::remove(path, ec);
+        std::error_code remove_ec;
+        std::filesystem::remove(path, remove_ec);
         std::filesystem::rename(tmp, path, ec);
+        if (ec) {
+            spdlog::warn("write_file_atomic: rename {} -> {} failed ({}); "
+                         "the .tmp file was preserved for manual recovery",
+                         tmp, path, ec.message());
+        }
     }
 }
 
