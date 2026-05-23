@@ -71,6 +71,7 @@ void RiskManager::on_fill(const std::string& ticker, const std::string& contract
     auto& pos = positions_[ticker];
     pos.ticker = ticker;
     pos.contract_side = contract_side;
+    pos.fees_paid += fee;
 
     if (quantity > 0) {
         // Buy: increase position, debit balance (cost + fee)
@@ -105,7 +106,12 @@ void RiskManager::on_settlement(const std::string& ticker, double pnl) {
         auto it = positions_.find(ticker);
         if (it != positions_.end()) {
             it->second.settled = true;
-            balance_ += it->second.cost + pnl;  // Return cost + profit/loss
+            // Return cost + fees_paid (both were debited at on_fill) then
+            // apply pnl. The pnl passed in here is the exchange's
+            // settled_pnl, which already includes the fee — without
+            // re-crediting fees_paid we would double-count it. See
+            // hotfix-bugs #2.
+            balance_ += it->second.cost + it->second.fees_paid + pnl;
             daily_pnl_ += pnl;
             active_markets_.erase(ticker);
         }

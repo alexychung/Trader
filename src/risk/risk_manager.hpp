@@ -15,6 +15,13 @@ struct RiskPosition {
     std::string contract_side;
     int quantity = 0;
     double cost = 0.0;
+    // Cumulative maker/taker fees paid to build/reduce this position.
+    // RiskManager debits both `cost` AND `fees_paid` from balance at fill
+    // time. On settlement we add back `cost + fees_paid` and then apply
+    // the settled_pnl (which the exchange computes *including* fees) —
+    // without tracking fees here, the fee was subtracted twice. See
+    // hotfix-bugs #2.
+    double fees_paid = 0.0;
     bool settled = false;
 };
 

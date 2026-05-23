@@ -176,6 +176,38 @@ TEST_F(RiskManagerTest, SettlementRemovesFromExposure) {
     EXPECT_DOUBLE_EQ(rm_->total_exposure(), 1.5);
 }
 
+TEST_F(RiskManagerTest, SettlementWithFeeMatchesTrueCashFlow) {
+    // hotfix-bugs task #2: RiskManager used to debit fee at on_fill AND
+    // again via the fees-included pnl passed to on_settlement, leaving
+    // balance short by exactly one fee per settled trade. Net error
+    // accumulated as 0.05 per trade across a session, biasing the kill
+    // switch toward early triggers and Kelly sizing toward conservative.
+    //
+    // Truth: a win with cost=$2, fee=$0.05, revenue=$5 means net +$2.95.
+    // Anything else means we're double-counting either cost or fee.
+    rm_->set_balance(100.0);
+    rm_->on_fill("WIN", "yes", 5, 0.40, 0.05);
+    EXPECT_DOUBLE_EQ(rm_->balance(), 97.95);  // -cost(2) -fee(0.05)
+
+    // KalshiExchange computes settled_pnl = qty - cost - fees_paid.
+    // For our position: 5 - 2 - 0.05 = +$2.95.
+    rm_->on_settlement("WIN", +2.95);
+    EXPECT_DOUBLE_EQ(rm_->balance(), 102.95);  // initial(100) + net(2.95)
+    EXPECT_DOUBLE_EQ(rm_->daily_pnl(), 2.95);
+}
+
+TEST_F(RiskManagerTest, SettlementLossWithFeeMatchesTrueCashFlow) {
+    // Lose case: cost=$3, fee=$0.05, revenue=$0 → net -$3.05.
+    rm_->set_balance(100.0);
+    rm_->on_fill("LOSE", "yes", 5, 0.60, 0.05);
+    EXPECT_DOUBLE_EQ(rm_->balance(), 96.95);  // -cost(3) -fee(0.05)
+
+    // KalshiExchange computes settled_pnl = -cost - fees_paid = -3.05.
+    rm_->on_settlement("LOSE", -3.05);
+    EXPECT_DOUBLE_EQ(rm_->balance(), 96.95);  // unchanged from post-fill
+    EXPECT_DOUBLE_EQ(rm_->daily_pnl(), -3.05);
+}
+
 TEST_F(RiskManagerTest, SettlementWithoutPriorFillIsNoOp) {
     // Defensive: a settlement event arriving for a ticker the risk manager
     // never tracked (e.g., position was fully seeded via the REST path and
