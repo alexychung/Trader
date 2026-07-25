@@ -1,3 +1,5 @@
+> **This is an AI experiment — to see how well Claude can vibecode a trading bot.** Effectively all of the code, research, and docs here were written by Claude. Treat it as an experiment, not investment advice.
+
 # Trader — Kalshi NBA Bot
 
 C++20 trading bot for Kalshi NBA in-game contracts.
